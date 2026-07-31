@@ -80,12 +80,14 @@ def call_grok_agent(state: AgentState):
     existing_summary = state.get("summary", "")
     summary = existing_summary or f"Handled request: {original_query}"
     current_topic = state.get("current_topic") or original_query or "general"
+    output = _normalize_content(getattr(response, "content", ""))
 
     return {
         "messages": [response],
         "summary": summary,
         "original_query": original_query,
         "current_topic": current_topic,
+        "output": output,
     }
 
 
