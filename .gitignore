@@ -1,2 +1,5 @@
 .env
 *.pyc
+
+# Local state written by `langgraph dev`
+.langgraph_api/

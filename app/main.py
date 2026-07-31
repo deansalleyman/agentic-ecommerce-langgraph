@@ -2,14 +2,6 @@ import os
 from pathlib import Path
 from typing import Annotated, Any, Literal, Sequence, TypedDict
 
-from fastapi import FastAPI
-from langchain_core.messages import BaseMessage, HumanMessage
-from langchain_core.tools import tool
-from langchain_xai import ChatXAI
-from langgraph.graph import END, START, StateGraph, add_messages
-from langgraph.prebuilt import ToolNode
-from pydantic import BaseModel
-
 
 def load_env_file() -> None:
     env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -27,7 +19,18 @@ def load_env_file() -> None:
         os.environ.setdefault(key, value)
 
 
+# Must run before the langchain/langgraph imports below: the LangSmith SDK caches
+# some env-var reads on first access, so LANGSMITH_* has to be in os.environ by
+# the time those packages are imported for tracing to pick it up.
 load_env_file()
+
+from fastapi import FastAPI  # noqa: E402
+from langchain_core.messages import BaseMessage, HumanMessage  # noqa: E402
+from langchain_core.tools import tool  # noqa: E402
+from langchain_xai import ChatXAI  # noqa: E402
+from langgraph.graph import END, START, StateGraph, add_messages  # noqa: E402
+from langgraph.prebuilt import ToolNode  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
 
 class AgentState(TypedDict):
@@ -36,7 +39,6 @@ class AgentState(TypedDict):
     current_topic: str
     summary: str
     original_query: str
-    decision: str
     input: str
     output: str
 # -------------------------------------------------------------
@@ -57,7 +59,7 @@ tool_node = ToolNode(tools)
 # 2. Initialize Grok
 # -------------------------------------------------------------
 # fetch the XAI API key from environment variables
-xai_api_key = os.getenv("XAI_API_KEY") or ""
+xai_api_key = os.getenv("XAI_API_KEY", "")
 xai_model = os.getenv("XAI_MODEL", "grok-4")
 model: ChatXAI | None = None
 model_with_tools: Any | None = None
@@ -114,20 +116,18 @@ graph = workflow.compile()
 
 
 # 4. Initialize FastAPI app
-app = FastAPI(title="Local LangGraph FastAPI", version="1.0.0")
+app = FastAPI(title="Agentic E-commerce LangGraph API", version="1.0.0")
 
 
 class RequestPayload(BaseModel):
     text: str
-    decision: str = ""
 
 
-def build_initial_state(text: str, decision: str = "") -> AgentState:
+def build_initial_state(text: str) -> AgentState:
     return {
         "input": text,
         "output": "",
         "messages": [HumanMessage(content=text)],
-        "decision": decision,
         "original_query": text,
         "summary": "",
         "current_topic": text,
@@ -193,7 +193,7 @@ def read_root():
 # 5. Expose graph execution via a POST route
 @app.post("/run-graph")
 def run_graph(payload: RequestPayload):
-    initial_state = build_initial_state(payload.text, payload.decision)
+    initial_state = build_initial_state(payload.text)
     result = graph.invoke(initial_state)
     react_output = build_react_output(result)
     return {
@@ -210,7 +210,7 @@ def run_graph(payload: RequestPayload):
 
 @app.get("/test")
 async def test_graph(text: str):
-    initial_state = build_initial_state(text, "test")
+    initial_state = build_initial_state(text)
     result = graph.invoke(initial_state)
     react_output = build_react_output(result)
     return {
