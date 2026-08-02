@@ -26,25 +26,73 @@ uv run fastapi dev
 ```
 
 ### Calling the API
-Once the server is running, you can call the graph endpoint with a JSON body:
+
+The API follows the LangGraph Platform resource shape: create a thread, then post runs to it.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/threads` | Create a thread, returns `{"thread_id": ...}` |
+| `POST` | `/threads/{thread_id}/runs` | Run the graph on that thread, streams SSE |
+| `GET` | `/threads/{thread_id}/state` | Non-streaming snapshot of the thread |
+
+**1. Create a thread**
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/run-graph" \
+THREAD_ID=$(curl -sX POST http://127.0.0.1:8000/threads | jq -r .thread_id)
+```
+
+**2. Start a run**
+
+```bash
+curl -N -X POST "http://127.0.0.1:8000/threads/$THREAD_ID/runs" \
   -H "Content-Type: application/json" \
-  -d '{"text": "Calculate the cargo weight for 10 boxes at 3.5 kg each"}'
+  -d '{"input": "Calculate the cargo weight for 10 boxes at 3.5 kg each"}'
 ```
 
-The response includes:
-- `summary`: a short summary of the run
-- `original_query`: the original input text
-- `react.steps`: the ReAct-style execution trace
-- `react.final_answer`: the final answer produced by the model
+The response is a Server-Sent Events stream of four event types:
 
-You can also test the route directly in the browser by opening:
+- `run_started` — echoes the thread id
+- `message` — one per message a node produced, with `node`, `type`, `content` and any `tool_calls`
+- `interrupt` — the graph paused for human input (see below); no further events until you resume
+- `done` — carries the full `react` trace: `react.steps` and `react.final_answer`
 
-```text
-http://127.0.0.1:8000/docs
+Posting another `{"input": ...}` to the same thread continues the conversation — the checkpointer
+keeps the message history, so follow-ups like *"what was that in pounds?"* work.
+
+**3. Resume a paused run**
+
+When the calculated weight exceeds `MAX_CARGO_WEIGHT_KG` (default 100), the stream ends on an
+`interrupt` event asking for adjusted values. Send them back as a command:
+
+```bash
+curl -N -X POST "http://127.0.0.1:8000/threads/$THREAD_ID/runs" \
+  -H "Content-Type: application/json" \
+  -d '{"command": {"resume": {"item_count": 4, "unit_weight": 10}}}'
 ```
+
+Values that are missing, non-numeric, or not greater than zero do **not** resume the graph. The
+node re-prompts: you get another `interrupt` event, this time with an `error` field explaining
+what was wrong, and the thread stays paused until usable numbers arrive.
+
+**4. Inspect a thread**
+
+```bash
+curl "http://127.0.0.1:8000/threads/$THREAD_ID/state"
+```
+
+Returns `status` (`idle` or `interrupted`), any pending `interrupts`, `summary`, `original_query`
+and the same `react` trace. Browser-friendly, as is the interactive documentation at
+`http://127.0.0.1:8000/docs`.
+
+**Error responses**
+
+| Status | Meaning |
+| --- | --- |
+| `404` | Unknown `thread_id` — create it with `POST /threads` first |
+| `409` | Wrong mode for the thread's current state: a `command` sent to a thread with no pending interrupt, or an `input` sent to a paused one. The body of the paused case includes the pending `interrupts` |
+| `422` | `input` was empty |
+
+Threads live in memory (`InMemorySaver`) and are lost when the server restarts.
 
 ## Using LangSmith
 
@@ -87,9 +135,10 @@ uv run fastapi dev
 ```
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/run-graph" \
+THREAD_ID=$(curl -sX POST http://127.0.0.1:8000/threads | jq -r .thread_id)
+curl -N -X POST "http://127.0.0.1:8000/threads/$THREAD_ID/runs" \
   -H "Content-Type: application/json" \
-  -d '{"text": "Calculate the cargo weight for 10 boxes at 3.5 kg each"}'
+  -d '{"input": "Calculate the cargo weight for 10 boxes at 3.5 kg each"}'
 ```
 
 Then open https://smith.langchain.com, find the `agentic-ecommerce-langgraph` project in the
@@ -108,9 +157,9 @@ misread the result.
 
 A few things worth knowing about this project specifically:
 
-- **Each API request is its own standalone trace.** The graph is compiled without a checkpointer
-  and the routes call `graph.invoke(...)` without a thread id, so runs are not grouped into
-  conversations. Nothing carries over between requests.
+- **Each run is its own trace, but runs share a thread.** The graph is compiled with an
+  `InMemorySaver` and every route passes a `thread_id`, so message history carries across runs on
+  the same thread — a resumed interrupt continues the conversation it paused.
 - **Failed runs are traced too.** If `XAI_API_KEY` is missing or the model errors, the run shows
   up in red with the exception attached — often faster to read than the API response.
 - **Import order matters.** `app/main.py` loads `.env` *before* importing langchain/langgraph,
@@ -147,9 +196,9 @@ Calculate the cargo weight for 10 boxes at 3.5 kg each
 
 From there you can watch the graph light up node by node, click any node to inspect the state
 going in and out, edit that state and continue, or fork a thread to re-run from an earlier step
-with a different input. Unlike the FastAPI path, Studio runs *do* persist as threads — the dev
-server supplies its own in-memory checkpointer, which is why `workflow.compile()` in `app/main.py`
-deliberately takes no checkpointer argument.
+with a different input. Studio threads are separate from the FastAPI ones: the dev server supplies
+its own persistence layer and overrides the `InMemorySaver` compiled into `app/main.py`, so a
+thread id from one path means nothing to the other.
 
 The dev server is independent of `uv run fastapi dev` (port 8000), so you can run both at once.
 Studio writes local state to `.langgraph_api/`, which is gitignored.

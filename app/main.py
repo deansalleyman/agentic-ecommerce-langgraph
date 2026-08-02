@@ -26,17 +26,22 @@ def load_env_file() -> None:
 # the time those packages are imported for tracing to pick it up.
 load_env_file()
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
 from langchain_core.messages import BaseMessage, HumanMessage  # noqa: E402
+from langchain_core.runnables import RunnableConfig  # noqa: E402
 from langchain_core.tools import tool  # noqa: E402
 from langchain_xai import ChatXAI  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
-from langgraph.graph import END, START, StateGraph, add_messages  # noqa: E402
+from langgraph.graph import START, StateGraph, add_messages  # noqa: E402
 from langgraph.prebuilt import ToolNode  # noqa: E402
 from langgraph.store.memory import InMemoryStore  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt  # noqa: E402
+from pydantic import BaseModel, SecretStr  # noqa: E402
+
+# Maximum allowed cargo weight before the graph pauses for human review
+MAX_CARGO_WEIGHT_KG: float = float(os.getenv("MAX_CARGO_WEIGHT_KG", "100"))
+
 
 class AgentState(TypedDict):
     # Appends new messages to the history instead of overwriting
@@ -75,7 +80,7 @@ model: ChatXAI | None = None
 model_with_tools: Any | None = None
 
 if xai_api_key:
-    model = ChatXAI(api_key=xai_api_key, model=xai_model, temperature=0.1)
+    model = ChatXAI(api_key=SecretStr(xai_api_key), model=xai_model, temperature=0.1)
     model_with_tools = model.bind_tools(tools)
 
 
@@ -133,7 +138,7 @@ def build_react_output(state: dict[str, Any], thread_id: str) -> dict[str, Any]:
 
 
 # -------------------------------------------------------------
-# 4. Define Graph Nodes and Routing Logic
+# 4. Graph nodes and routing
 # -------------------------------------------------------------
 def call_grok_agent(state: AgentState):
     """Passes the current conversation history to Grok to decide the next move."""
@@ -156,30 +161,105 @@ def call_grok_agent(state: AgentState):
     }
 
 
-def should_continue(state: AgentState) -> Literal["tools", END]:
-    """Inspects the last message to see if Grok requested a tool call."""
+def should_continue(state: AgentState) -> Literal["tools", "__end__"]:
+    """Routes to the tools node if Grok requested a tool call, otherwise ends."""
     messages = state.get("messages", [])
     if not messages:
-        return END
+        return "__end__"
     last_message = messages[-1]
     if getattr(last_message, "tool_calls", None):
         return "tools"
-    return END
+    return "__end__"
 
-def approval_node(state: AgentState):
-    # Pause and ask for approval
-    approved = interrupt("Do you approve this action?")
 
-    # When you resume, Command(resume=...) returns that value here
-    return {"approved": approved}
+def weight_review_node(state: AgentState):
+    """
+    After cargo weight is calculated, check if it exceeds MAX_CARGO_WEIGHT_KG.
+    If it does, pause via interrupt() and ask the user to supply new item_count
+    and unit_weight. The graph resumes when POST /threads/{id}/runs is called
+    with {"command": {"resume": {"item_count": ..., "unit_weight": ...}}}.
+    Unusable values re-prompt rather than resuming.
+    """
+    messages = state.get("messages", [])
+
+    # Find the most recent calculate_cargo_weight tool result
+    last_tool_msg = next(
+        (
+            m for m in reversed(messages)
+            if getattr(m, "type", None) == "tool"
+            and getattr(m, "name", "") == "calculate_cargo_weight"
+        ),
+        None,
+    )
+
+    if last_tool_msg is None:
+        return {}
+
+    try:
+        weight = float(_normalize_content(getattr(last_tool_msg, "content", "0")))
+    except (ValueError, TypeError):
+        return {}
+
+    if weight <= MAX_CARGO_WEIGHT_KG:
+        # Weight is acceptable — continue to agent for the final answer
+        return {}
+
+    # Weight exceeds the limit — pause and hand control back to the user.
+    # A malformed answer re-prompts instead of resuming: interrupt() is called
+    # again, so the thread stays paused until usable numbers arrive.
+    question = (
+        f"Total weight {weight} kg exceeds the {MAX_CARGO_WEIGHT_KG} kg limit. "
+        "Please provide adjusted item_count and unit_weight."
+    )
+    error: str | None = None
+
+    while True:
+        request: dict[str, Any] = {
+            "question": question,
+            "current_weight": weight,
+            "limit_kg": MAX_CARGO_WEIGHT_KG,
+        }
+        if error:
+            request["error"] = error
+
+        user_input: Any = interrupt(request)
+
+        try:
+            new_item_count = int(user_input["item_count"])
+            new_unit_weight = float(user_input["unit_weight"])
+        except (KeyError, TypeError, ValueError):
+            error = "item_count (integer) and unit_weight (number) are both required."
+            continue
+
+        if new_item_count <= 0 or new_unit_weight <= 0:
+            error = "item_count and unit_weight must both be greater than zero."
+            continue
+
+        break
+
+    # Inject a new human message so the agent recalculates with the updated values
+    return {
+        "messages": [
+            HumanMessage(
+                content=(
+                    f"Recalculate cargo weight with {new_item_count} items "
+                    f"at {new_unit_weight} kg each."
+                )
+            )
+        ]
+    }
+
 
 # Build and compile the LangGraph workflow
+# weight_review sits between tools and agent so it can intercept heavy loads
 workflow = StateGraph(AgentState)
 workflow.add_node("agent", call_grok_agent)
 workflow.add_node("tools", tool_node)
+workflow.add_node("weight_review", weight_review_node)
 workflow.add_edge(START, "agent")
 workflow.add_conditional_edges("agent", should_continue)
-workflow.add_edge("tools", "agent")
+workflow.add_edge("tools", "weight_review")
+workflow.add_edge("weight_review", "agent")
 graph = workflow.compile(checkpointer=checkpointer, store=store)
 
 
@@ -189,13 +269,32 @@ graph = workflow.compile(checkpointer=checkpointer, store=store)
 app = FastAPI(title="Agentic E-commerce LangGraph API", version="1.0.0")
 
 
-class StartPayload(BaseModel):
-    text: str
+class RunCommand(BaseModel):
+    """Mirrors LangGraph's Command — the value handed back to a paused interrupt()."""
+
+    resume: dict[str, Any]
 
 
-class ResumePayload(BaseModel):
-    thread_id: str
-    text: str
+class RunPayload(BaseModel):
+    # Exactly one of these: `input` starts or continues a conversation,
+    # `command` resumes a thread paused at an interrupt.
+    input: str | None = None
+    command: RunCommand | None = None
+
+
+# Threads live only as long as the process, same as the InMemorySaver backing them.
+# Tracking ids explicitly is what lets an unknown thread 404 instead of silently
+# behaving like a brand-new one.
+_thread_ids: set[str] = set()
+
+
+def _pending_interrupts(snapshot: Any) -> list[Any]:
+    """Interrupt payloads the thread is currently waiting on, newest task first."""
+    return [
+        getattr(intr, "value", intr)
+        for task in (snapshot.tasks or ())
+        for intr in (getattr(task, "interrupts", None) or ())
+    ]
 
 
 def build_initial_state(text: str) -> AgentState:
@@ -209,32 +308,48 @@ def build_initial_state(text: str) -> AgentState:
     }
 
 
-def _stream_graph(input_state: Any, thread_id: str) -> StreamingResponse:
-    """Stream graph execution as Server-Sent Events."""
-    config = {"configurable": {"thread_id": thread_id}}
+def _stream_graph(graph_input: Any, thread_id: str) -> StreamingResponse:
+    """Stream graph execution (new run or Command resume) as Server-Sent Events."""
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
 
     def event_generator():
-        yield f"data: {json.dumps({'event': 'thread_created', 'thread_id': thread_id})}\n\n"
+        yield f"data: {json.dumps({'event': 'run_started', 'thread_id': thread_id})}\n\n"
 
-        for chunk in graph.stream(input_state, config=config, stream_mode="updates"):
+        for chunk in graph.stream(graph_input, config=config, stream_mode="updates"):
+            # Interrupt detected — pause and tell the client to post a resume command
+            if "__interrupt__" in chunk:
+                for intr in chunk["__interrupt__"]:
+                    intr_value = getattr(intr, "value", intr)
+                    yield (
+                        f"data: {json.dumps({'event': 'interrupt', 'thread_id': thread_id, 'data': intr_value})}\n\n"
+                    )
+                return  # Stop streaming until the user resumes
+
             for node_name, node_output in chunk.items():
-                for msg in node_output.get("messages", []):
-                    payload = {
-                        "event": "message",
-                        "node": node_name,
-                        "type": getattr(msg, "type", ""),
-                        "content": _normalize_content(getattr(msg, "content", "")),
-                    }
-                    tool_calls = getattr(msg, "tool_calls", None)
-                    if tool_calls:
-                        payload["tool_calls"] = [
-                            {
-                                "name": tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", ""),
-                                "args": tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {}),
-                            }
-                            for tc in tool_calls
-                        ]
-                    yield f"data: {json.dumps(payload)}\n\n"
+                # A node that returns {} or None (e.g. weight_review under the limit)
+                # streams as {"node": None}; a node that ran more than once in a
+                # superstep streams a list of updates.
+                updates = node_output if isinstance(node_output, list) else [node_output]
+                for update in updates:
+                    if not isinstance(update, dict):
+                        continue
+                    for msg in update.get("messages") or []:
+                        payload: dict[str, Any] = {
+                            "event": "message",
+                            "node": node_name,
+                            "type": getattr(msg, "type", ""),
+                            "content": _normalize_content(getattr(msg, "content", "")),
+                        }
+                        tool_calls = getattr(msg, "tool_calls", None)
+                        if tool_calls:
+                            payload["tool_calls"] = [
+                                {
+                                    "name": tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", ""),
+                                    "args": tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {}),
+                                }
+                                for tc in tool_calls
+                            ]
+                        yield f"data: {json.dumps(payload)}\n\n"
 
         final_state = graph.get_state(config)
         react_output = build_react_output(dict(final_state.values), thread_id)
@@ -248,33 +363,80 @@ def read_root():
     return {"message": "LangGraph FastAPI is running locally!"}
 
 
-@app.post("/run-graph")
-def run_graph(payload: StartPayload):
-    """Start a new graph thread and stream the ReAct execution back as SSE."""
+@app.post("/threads", status_code=201)
+def create_thread():
+    """Create a conversation thread. Runs are then posted against its id."""
     thread_id = str(uuid.uuid4())
-    return _stream_graph(build_initial_state(payload.text), thread_id)
+    _thread_ids.add(thread_id)
+    return {"thread_id": thread_id}
 
 
-@app.post("/user-response")
-def user_response(payload: ResumePayload):
-    """Continue an existing thread with a new user message and stream the response."""
-    return _stream_graph(
-        {"messages": [HumanMessage(content=payload.text)]},
-        payload.thread_id,
+@app.post("/threads/{thread_id}/runs")
+def create_run(thread_id: str, payload: RunPayload):
+    """
+    Execute the graph on a thread and stream the ReAct trace back as SSE.
+
+    - `{"input": "..."}` starts the conversation, or adds a turn to an existing one.
+    - `{"command": {"resume": {...}}}` resumes a thread paused at an interrupt.
+
+    Which one is required depends on whether the thread is currently paused, so
+    the client never has to guess — a mismatch comes back as 409 with the reason.
+    """
+    if thread_id not in _thread_ids:
+        raise HTTPException(status_code=404, detail=f"Unknown thread: {thread_id}")
+
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    snapshot = graph.get_state(config)
+    interrupts = _pending_interrupts(snapshot)
+
+    if interrupts:
+        if payload.command is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Thread is paused at an interrupt; resume it with a command.",
+                    "interrupts": interrupts,
+                },
+            )
+        return _stream_graph(Command(resume=payload.command.resume), thread_id)
+
+    if payload.command is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Thread has no pending interrupt to resume; send an input instead.",
+        )
+    if not payload.input:
+        raise HTTPException(status_code=422, detail="input must be a non-empty string.")
+
+    # First run on the thread seeds the full state; later runs just add a turn.
+    started = bool(snapshot.values.get("messages"))
+    graph_input: Any = (
+        {"messages": [HumanMessage(content=payload.input)]}
+        if started
+        else build_initial_state(payload.input)
     )
+    return _stream_graph(graph_input, thread_id)
 
 
-@app.get("/test")
-async def test_graph(text: str):
-    """Quick GET endpoint for browser testing — non-streaming."""
-    thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
-    result = graph.invoke(build_initial_state(text), config=config)
-    react_output = build_react_output(result, thread_id)
+@app.get("/threads/{thread_id}/state")
+def get_thread_state(thread_id: str):
+    """Non-streaming snapshot of a thread — useful after a run, or from the browser."""
+    if thread_id not in _thread_ids:
+        raise HTTPException(status_code=404, detail=f"Unknown thread: {thread_id}")
+
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    snapshot = graph.get_state(config)
+    values = dict(snapshot.values)
+    interrupts = _pending_interrupts(snapshot)
+
     return {
         "thread_id": thread_id,
-        "summary": result.get("summary", ""),
-        "original_query": result.get("original_query", text),
-        "react": react_output,
+        "status": "interrupted" if interrupts else "idle",
+        "interrupts": interrupts,
+        "summary": values.get("summary", ""),
+        "original_query": values.get("original_query", ""),
+        "react": build_react_output(values, thread_id),
     }
+
+
 
