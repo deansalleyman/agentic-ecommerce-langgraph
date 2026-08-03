@@ -23,7 +23,7 @@ cp .env.example .env
 | --- | --- | --- |
 | `XAI_API_KEY` | yes | Authenticates the Grok model. The graph raises at runtime without it. |
 | `XAI_MODEL` | no | Model name, defaults to `grok-4`. |
-| `MAX_CARGO_WEIGHT_KG` | no | Weight above which a run pauses for human review, defaults to `100`. |
+| `MAX_CARGO_WEIGHT_LB` | no | Weight above which a run pauses for human review, defaults to `220`. |
 | `LANGSMITH_TRACING` | for tracing | Set to `true` to send traces to LangSmith. |
 | `LANGSMITH_API_KEY` | for tracing / Studio | From https://smith.langchain.com → Settings → API Keys. |
 | `LANGSMITH_PROJECT` | no | Project the traces land in, defaults to `default`. |
@@ -83,18 +83,40 @@ keeps the message history, so follow-ups like *"the MSR is too pricey, drop it"*
 
 **3. Resume a paused run**
 
-When the calculated weight exceeds `MAX_CARGO_WEIGHT_KG` (default 100), the stream ends on an
-`interrupt` event asking for adjusted values. Send them back as a command:
+The graph pauses when the customer's **chosen** kit goes over the pack-weight limit for the
+trip — their own `max_carry_weight_lb` if they set one, otherwise `MAX_CARGO_WEIGHT_LB`
+(default 220). The total is summed in code from the catalog, never from the model, so the
+review triggers on a figure that is always right. It is checked after a gear decision or a
+change to the limit.
+
+The `interrupt` payload carries what was chosen, how far over it is, and the lighter
+options already discussed for each need:
+
+```json
+{ "question": "The chosen kit is 6.44 lb, 1.44 lb over the 5.0 lb limit for this trip. ...",
+  "committed_lb": 6.44, "limit_lb": 5.0, "over_by_lb": 1.44,
+  "items": [{"need_id": "tent", "name": "Vango Nevis 200", "weight_lb": 4.19, "...": "..."}],
+  "lighter_options": {"tent": [{"product_id": "tent-terranova-laser-2", "saves_lb": 0.6}]} }
+```
+
+Resume with exactly one of four resolutions:
 
 ```bash
 curl -N -X POST "http://127.0.0.1:8000/threads/$THREAD_ID/runs" \
   -H "Content-Type: application/json" \
-  -d '{"command": {"resume": {"item_count": 4, "unit_weight": 10}}}'
+  -d '{"command": {"resume": {"swap": {"need_id": "tent", "product_id": "tent-terranova-laser-2"}}}}'
 ```
 
-Values that are missing, non-numeric, or not greater than zero do **not** resume the graph. The
-node re-prompts: you get another `interrupt` event, this time with an `error` field explaining
-what was wrong, and the thread stays paused until usable numbers arrive.
+| Resume value | Effect |
+| --- | --- |
+| `{"swap": {"need_id": ..., "product_id": ...}}` | Choose a different product for that need |
+| `{"drop": "tent"}` | Un-choose it; the candidate is kept, marked eliminated with the reason |
+| `{"max_carry_weight_lb": 7}` | Raise (or lower) the trip's limit |
+| `{"warning_overridden": true}` | Carry on over the limit anyway |
+
+After a swap, drop, or limit change the total is **re-checked**: if the pack is still over,
+you get another `interrupt` rather than a silent pass. Anything else re-prompts with an
+`error` field, and the thread stays paused until it gets a usable answer.
 
 **4. Inspect a thread, or a customer**
 
@@ -219,7 +241,7 @@ uv run fastapi dev
 THREAD_ID=$(curl -sX POST http://127.0.0.1:8000/threads | jq -r .thread_id)
 curl -N -X POST "http://127.0.0.1:8000/threads/$THREAD_ID/runs" \
   -H "Content-Type: application/json" \
-  -d '{"input": "Calculate the cargo weight for 10 boxes at 3.5 kg each"}'
+  -d '{"input": "Calculate the cargo weight for 10 boxes at 7.5 lb each"}'
 ```
 
 Then open https://smith.langchain.com, find the `agentic-ecommerce-langgraph` project in the
@@ -229,7 +251,7 @@ span per step:
 - `agent` → the `ChatXAI` call, with the full message list sent to Grok — including the
   rendered memory prompt — the raw reply, latency and token usage. Requested `tool_calls`
   appear here, whether for a catalog tool or the `MemoryRouter`.
-- `tools` → the `search_products` / `get_product` / `calculate_cargo_weight` invocation, with
+- `tools` → the `search_products` / `get_product` / `calculate_gear_weight` invocation, with
   the arguments Grok chose and the value returned.
 - `update_profile` / `update_trip` / `update_gear_needs` → the trustcall extractor. Expand it
   to see the `PatchDoc` call: the `planned_edits` sentence and the individual JSON patches.

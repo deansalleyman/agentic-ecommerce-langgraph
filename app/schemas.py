@@ -133,6 +133,15 @@ class TripPlan(BaseModel):
         description="Weather and terrain they expect, in their own words. e.g. 'rain, "
         "near freezing at night, exposed ridges'.",
     )
+    max_carry_weight_lb: float | None = Field(
+        default=None,
+        description="The heaviest loaded pack the customer is willing to carry on THIS "
+        "trip, in lb. A total for everything they carry, not the weight of any one item. "
+        "Only set it if they have stated a limit for this trip, e.g. 'I don't want to "
+        "carry more than 30 lb' — it belongs to the trip, so do not carry one over from "
+        "an earlier trip and do not infer one from their experience or fitness. If they "
+        "have not given a limit, leave it null; never write 0.",
+    )
 
 
 class CandidateProduct(BaseModel):
@@ -151,14 +160,15 @@ class CandidateProduct(BaseModel):
     fit_reason: str | None = Field(
         default=None,
         description="Always fill this in when adding a candidate: why this product suits "
-        "this customer and this trip, citing its specs. e.g. '1.7kg, under their 2kg "
+        "this customer and this trip, citing its specs. e.g. '3.8 lb, under their 4.5 lb "
         "limit, 3-season'. This is your assessment, not something the customer said.",
     )
     eliminated_reason: str | None = Field(
         default=None,
         description="Why it was ruled out, in the customer's terms. e.g. 'over budget at "
-        "£480', 'too heavy to carry for 3 days'.",
+        "$480', 'too heavy to carry for 3 days'.",
     )
+    weight: float | None = Field(default=None, description="Weight of the product in lb.")
 
 
 class GearNeed(BaseModel):
@@ -177,8 +187,8 @@ class GearNeed(BaseModel):
     )
     requirements: str | None = Field(
         default=None,
-        description="What the item has to satisfy, e.g. '2-person, under 2kg, 3-season, "
-        "under £300'.",
+        description="What the item has to satisfy, e.g. '2-person, under 4.5 lb, 3-season, "
+        "under $300'.",
     )
     status: Literal["exploring", "narrowed", "decided"] = Field(
         default="exploring",
@@ -193,6 +203,19 @@ class GearNeed(BaseModel):
         description="Every product considered for this need, including eliminated ones — "
         "the history of the decision is the point, so never drop entries.",
     )
+    weight: float | None = Field(default=None, description="Weight of the need in lb.")
+
+
+class GearItem(BaseModel):
+    """One line in a pack list, for weighing up what a camper will carry.
+
+    Typed rather than a loose dict so the model is given a schema for it: an untyped
+    argument leaves it guessing the shape, and it guesses wrong.
+    """
+
+    name: str = Field(description="What the item is, e.g. 'tent', 'stove', 'day of food'.")
+    weight_lb: float = Field(description="Weight of a single one of these, in lb.")
+    quantity: int = Field(default=1, description="How many of this item are being carried.")
 
 
 # -------------------------------------------------------------
@@ -211,7 +234,7 @@ class Product(BaseModel):
     in_stock: bool = True
     # Category-specific specs stay explicit rather than a loose dict, so search can filter
     # on them. Each is only meaningful for some categories.
-    weight_kg: float | None = None
+    weight_lb: float | None = None
     season: Literal["summer", "3-season", "winter"] | None = None
     capacity: int | None = None
     temp_rating_c: float | None = None

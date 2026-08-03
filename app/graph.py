@@ -35,10 +35,10 @@ from app import memory  # noqa: E402
 from app.catalog import catalog_tools  # noqa: E402
 from app.formatting import normalize_content  # noqa: E402
 from app.llm import require_model  # noqa: E402
-from app.schemas import MemoryRouter  # noqa: E402
+from app.schemas import GearItem, MemoryRouter  # noqa: E402
 
 # Maximum allowed pack weight before the graph pauses for human review
-MAX_CARGO_WEIGHT_KG: float = float(os.getenv("MAX_CARGO_WEIGHT_KG", "100"))
+MAX_CARGO_WEIGHT_LB: float = float(os.getenv("MAX_CARGO_WEIGHT_LB", "220"))
 
 DEFAULT_USER_ID = "anonymous"
 
@@ -59,20 +59,30 @@ class AgentState(TypedDict):
 # 1. Tools
 # -------------------------------------------------------------
 @tool
-def calculate_cargo_weight(item_count: int, unit_weight: float) -> float:
-    """Calculates the total weight of a number of identical items, in kg.
+def calculate_gear_weight(items: list[GearItem]) -> float:
+    """Calculates the total weight of a pack list, in lb.
 
-    Use for working out what a pack or a shipment will weigh.
+    Use for working out what a camper can reasonably carry in their backpack. Pass one
+    entry per distinct item, each with its own weight in lb and how many are carried.
+
+    Args:
+        items: The pack list, e.g.
+            [{"name": "tent", "weight_lb": 3.79, "quantity": 1},
+             {"name": "day of food", "weight_lb": 1.8, "quantity": 3}]
+
+    Returns:
+        The total weight of everything on the list, in lb.
     """
-    print(f"Calculating cargo weight: item_count={item_count}, unit_weight={unit_weight}")
-    return item_count * unit_weight
+    total = sum(item.weight_lb * item.quantity for item in items)
+    print(f"Calculating gear weight: {len(items)} lines, total={total} lb")
+    return total
 
 
 # Persistence — the checkpointer holds threads, the store holds per-user memory
 checkpointer = InMemorySaver()
 store = InMemoryStore()
 
-tools = [calculate_cargo_weight, *catalog_tools]
+tools = [calculate_gear_weight, *catalog_tools]
 tool_node = ToolNode(tools)
 
 # MemoryRouter is bound so the model can request a memory write, but it is not in
@@ -96,20 +106,6 @@ def _router_call(message: Any) -> dict[str, Any] | None:
     return None
 
 
-def _trailing_tool_messages(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
-    """Tool results produced by the most recent step only.
-
-    Scanning the whole history instead would let a stale over-limit weight from earlier in
-    the conversation re-trigger the review on an unrelated turn.
-    """
-    trailing: list[BaseMessage] = []
-    for message in reversed(messages):
-        if getattr(message, "type", None) != "tool":
-            break
-        trailing.append(message)
-    return list(reversed(trailing))
-
-
 # -------------------------------------------------------------
 # 3. Nodes
 # -------------------------------------------------------------
@@ -118,7 +114,9 @@ def call_grok_agent(state: AgentState, config: RunnableConfig, store: BaseStore)
     model_with_tools = require_model().bind_tools(bindable_tools, parallel_tool_calls=False)
 
     user_id = _user_id(config)
-    system_prompt = SystemMessage(content=memory.render_memory_prompt(store, user_id))
+    system_prompt = SystemMessage(
+        content=memory.render_memory_prompt(store, user_id, MAX_CARGO_WEIGHT_LB)
+    )
     response = model_with_tools.invoke([system_prompt, *state["messages"]])
 
     original_query = state.get("original_query", "")
@@ -204,76 +202,109 @@ update_trip_node = _memory_node("trip", memory.update_trip)
 update_gear_needs_node = _memory_node("gear_needs", memory.update_gear_needs)
 
 
-def weight_review_node(state: AgentState):
+def weight_review_node(state: AgentState, config: RunnableConfig, store: BaseStore):
     """
-    After a weight is calculated, check whether it exceeds MAX_CARGO_WEIGHT_KG. If it
-    does, pause via interrupt() and ask for new item_count and unit_weight. The graph
-    resumes when POST /threads/{id}/runs is called with
-    {"command": {"resume": {"item_count": ..., "unit_weight": ...}}}.
-    Unusable values re-prompt rather than resuming.
+    Check the customer's chosen kit against the weight limit for this trip, and pause if
+    it is over.
+
+    The total is computed from the store — the products they have actually chosen, weighed
+    from the catalog — not read off a model's arithmetic. The limit is the trip's own
+    max_carry_weight_lb when they have set one, falling back to MAX_CARGO_WEIGHT_LB.
+
+    Resume via POST /threads/{id}/runs with exactly one of:
+        {"command": {"resume": {"swap": {"need_id": "tent", "product_id": "..."}}}}
+        {"command": {"resume": {"drop": "tent"}}}
+        {"command": {"resume": {"max_carry_weight_lb": 35}}}
+        {"command": {"resume": {"warning_overridden": true}}}
+    Anything else re-prompts, so the thread stays paused until it gets a usable answer.
     """
-    last_tool_msg = next(
-        (
-            m
-            for m in reversed(_trailing_tool_messages(state.get("messages", [])))
-            if getattr(m, "name", "") == "calculate_cargo_weight"
-        ),
-        None,
-    )
-
-    if last_tool_msg is None:
-        return {}
-
-    try:
-        weight = float(normalize_content(getattr(last_tool_msg, "content", "0")))
-    except (ValueError, TypeError):
-        return {}
-
-    if weight <= MAX_CARGO_WEIGHT_KG:
-        # Weight is acceptable — continue to agent for the final answer
-        return {}
-
-    # Weight exceeds the limit — pause and hand control back to the user.
-    # A malformed answer re-prompts instead of resuming: interrupt() is called again, so
-    # the thread stays paused until usable numbers arrive.
-    question = (
-        f"Total weight {weight} kg exceeds the {MAX_CARGO_WEIGHT_KG} kg limit. "
-        "Please provide adjusted item_count and unit_weight."
-    )
+    user_id = _user_id(config)
+    applied: list[str] = []
     error: str | None = None
 
     while True:
+        # Re-read every pass: an edit below changes the total, and the loop re-checks it.
+        trip = memory.get_trip(store, user_id)
+        needs = memory.get_gear_needs(store, user_id)
+        totals = memory.committed_totals(needs)
+        limit = memory.carry_limit(trip, MAX_CARGO_WEIGHT_LB)
+        over_by = round(totals["weight_lb"] - limit, 2)
+
+        if over_by <= 0:
+            break
+
         request: dict[str, Any] = {
-            "question": question,
-            "current_weight": weight,
-            "limit_kg": MAX_CARGO_WEIGHT_KG,
+            "question": (
+                f"The chosen kit is {totals['weight_lb']} lb, {over_by} lb over the "
+                f"{limit} lb limit for this trip. Swap something lighter, drop an item, "
+                "raise the limit, or carry on anyway."
+            ),
+            "committed_lb": totals["weight_lb"],
+            "limit_lb": limit,
+            "over_by_lb": over_by,
+            "items": totals["items"],
+            "lighter_options": memory.lighter_alternatives(needs),
         }
         if error:
             request["error"] = error
 
         user_input: Any = interrupt(request)
 
-        try:
-            new_item_count = int(user_input["item_count"])
-            new_unit_weight = float(user_input["unit_weight"])
-        except (KeyError, TypeError, ValueError):
-            error = "item_count (integer) and unit_weight (number) are both required."
+        # Resuming re-runs this node from the top, so any edit made here happens again on
+        # replay. Each of these is idempotent — setting the same selection or dropping an
+        # already-dropped need changes nothing the second time.
+        if not isinstance(user_input, dict):
+            error = "Send an object with one of: swap, drop, max_carry_weight_lb, warning_overridden."
             continue
 
-        if new_item_count <= 0 or new_unit_weight <= 0:
-            error = "item_count and unit_weight must both be greater than zero."
+        if user_input.get("warning_overridden"):
+            applied.append(
+                f"The customer chose to carry on at {totals['weight_lb']} lb, "
+                f"{over_by} lb over their {limit} lb limit."
+            )
+            break
+
+        swap = user_input.get("swap")
+        if isinstance(swap, dict) and swap.get("need_id") and swap.get("product_id"):
+            if memory.swap_selection(store, user_id, swap["need_id"], swap["product_id"]):
+                applied.append(f"Swapped {swap['need_id']} to {swap['product_id']}.")
+                error = None
+                continue
+            error = f"No such need or product: {swap['need_id']} / {swap['product_id']}."
             continue
 
-        break
+        dropped = user_input.get("drop")
+        if isinstance(dropped, str) and dropped:
+            if memory.drop_selection(
+                store, user_id, dropped, f"Pushed the pack over its {limit} lb limit."
+            ):
+                applied.append(f"Dropped the chosen {dropped}.")
+                error = None
+                continue
+            error = f"No such gear need: {dropped}."
+            continue
 
-    # Inject a new human message so the agent recalculates with the updated values
+        new_limit = user_input.get("max_carry_weight_lb")
+        if isinstance(new_limit, (int, float)) and not isinstance(new_limit, bool):
+            if new_limit <= 0:
+                error = "max_carry_weight_lb must be greater than zero."
+                continue
+            memory.set_carry_limit(store, user_id, float(new_limit))
+            applied.append(f"Raised the trip's pack limit to {new_limit} lb.")
+            error = None
+            continue
+
+        error = "Send an object with one of: swap, drop, max_carry_weight_lb, warning_overridden."
+
+    if not applied:
+        return {}
+
+    # Tell the agent what the customer decided, so it can explain the new position.
     return {
         "messages": [
             HumanMessage(
-                content=(
-                    f"Recalculate cargo weight with {new_item_count} items "
-                    f"at {new_unit_weight} kg each."
-                )
+                content=" ".join(applied)
+                + " Tell me where that leaves my pack weight."
             )
         ]
     }
@@ -292,11 +323,15 @@ workflow.add_node("update_gear_needs", update_gear_needs_node)
 
 workflow.add_edge(START, "agent")
 workflow.add_conditional_edges("agent", should_continue)
-workflow.add_edge("tools", "weight_review")
-workflow.add_edge("weight_review", "agent")
+
+# Tools return straight to the agent: they answer questions, they do not change what the
+# customer has chosen. The weight review sits after the two nodes that can put the pack
+# over its limit — deciding a product, or lowering the limit itself.
+workflow.add_edge("tools", "agent")
 workflow.add_edge("update_profile", "agent")
-workflow.add_edge("update_trip", "agent")
-workflow.add_edge("update_gear_needs", "agent")
+workflow.add_edge("update_trip", "weight_review")
+workflow.add_edge("update_gear_needs", "weight_review")
+workflow.add_edge("weight_review", "agent")
 
 # Two compilations of the same workflow, because the two runtimes persist differently.
 #

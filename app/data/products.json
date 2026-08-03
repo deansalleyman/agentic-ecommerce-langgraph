@@ -4,11 +4,15 @@
     "name": "MSR Hubba Hubba 2",
     "brand": "MSR",
     "category": "tent",
-    "price_usd": 480.00,
-    "weight_kg": 1.72,
+    "price_usd": 480.0,
+    "weight_lb": 3.79,
     "season": "3-season",
     "capacity": 2,
-    "activities": ["backpacking", "hiking", "wild camping"],
+    "activities": [
+      "backpacking",
+      "hiking",
+      "wild camping"
+    ],
     "description": "Freestanding two-person semi-geodesic. Two doors and two porches, so neither person climbs over the other. Pitches inner-first.",
     "in_stock": true
   },
@@ -17,11 +21,14 @@
     "name": "Terra Nova Laser Compact 2",
     "brand": "Terra Nova",
     "category": "tent",
-    "price_usd": 375.00,
-    "weight_kg": 1.63,
+    "price_usd": 375.0,
+    "weight_lb": 3.59,
     "season": "3-season",
     "capacity": 2,
-    "activities": ["backpacking", "wild camping"],
+    "activities": [
+      "backpacking",
+      "wild camping"
+    ],
     "description": "Lightweight two-person tunnel tent with a single side entrance. Pitches as one, which is welcome in rain.",
     "in_stock": true
   },
@@ -30,11 +37,15 @@
     "name": "Wild Country Zephyros Compact 2",
     "brand": "Wild Country",
     "category": "tent",
-    "price_usd": 165.00,
-    "weight_kg": 1.86,
+    "price_usd": 165.0,
+    "weight_lb": 4.1,
     "season": "3-season",
     "capacity": 2,
-    "activities": ["backpacking", "hiking", "wild camping"],
+    "activities": [
+      "backpacking",
+      "hiking",
+      "wild camping"
+    ],
     "description": "Sturdy budget two-person tunnel tent. Heavier fabric than race-weight shelters, and more tolerant of grit and wind for it.",
     "in_stock": true
   },
@@ -43,12 +54,15 @@
     "name": "Vango Nevis 200",
     "brand": "Vango",
     "category": "tent",
-    "price_usd": 130.00,
-    "weight_kg": 1.90,
+    "price_usd": 130.0,
+    "weight_lb": 4.19,
     "season": "3-season",
     "capacity": 2,
-    "activities": ["backpacking", "hiking"],
-    "description": "Two-person semi-geodesic at an entry price. Snug for two adults but genuinely under 2kg.",
+    "activities": [
+      "backpacking",
+      "hiking"
+    ],
+    "description": "Two-person semi-geodesic at an entry price. Snug for two adults but genuinely under 4.2 lb.",
     "in_stock": true
   },
   {
@@ -57,10 +71,14 @@
     "brand": "Alpkit",
     "category": "tent",
     "price_usd": 179.99,
-    "weight_kg": 1.55,
+    "weight_lb": 3.42,
     "season": "3-season",
     "capacity": 1,
-    "activities": ["backpacking", "wild camping", "bikepacking"],
+    "activities": [
+      "backpacking",
+      "wild camping",
+      "bikepacking"
+    ],
     "description": "One-person tunnel tent with a generous porch. A lot of shelter for the weight, if you are out alone.",
     "in_stock": true
   },
@@ -69,11 +87,15 @@
     "name": "Hilleberg Nallo 2",
     "brand": "Hilleberg",
     "category": "tent",
-    "price_usd": 875.00,
-    "weight_kg": 2.40,
+    "price_usd": 875.0,
+    "weight_lb": 5.29,
     "season": "winter",
     "capacity": 2,
-    "activities": ["mountaineering", "winter hiking", "wild camping"],
+    "activities": [
+      "mountaineering",
+      "winter hiking",
+      "wild camping"
+    ],
     "description": "Four-season tunnel tent in Kerlon 1200. Built for sustained wind and snow loading rather than fair-weather weekends.",
     "in_stock": true
   },
@@ -82,11 +104,14 @@
     "name": "Robens Boulder 3",
     "brand": "Robens",
     "category": "tent",
-    "price_usd": 240.00,
-    "weight_kg": 3.40,
+    "price_usd": 240.0,
+    "weight_lb": 7.5,
     "season": "3-season",
     "capacity": 3,
-    "activities": ["car camping", "basecamp"],
+    "activities": [
+      "car camping",
+      "basecamp"
+    ],
     "description": "Roomy three-person dome with standing-ish headroom at the centre. Too heavy to carry far, excellent from a car boot.",
     "in_stock": true
   },
@@ -95,25 +120,30 @@
     "name": "Vango Tay 400",
     "brand": "Vango",
     "category": "tent",
-    "price_usd": 95.00,
-    "weight_kg": 5.10,
+    "price_usd": 95.0,
+    "weight_lb": 11.24,
     "season": "summer",
     "capacity": 4,
-    "activities": ["car camping"],
+    "activities": [
+      "car camping"
+    ],
     "description": "Four-berth family tunnel tent with a sewn-in groundsheet. Summer festival and campsite duty.",
     "in_stock": true
   },
-
   {
     "product_id": "bag-rab-ascent-500",
     "name": "Rab Ascent 500",
     "brand": "Rab",
     "category": "sleeping_bag",
-    "price_usd": 210.00,
-    "weight_kg": 1.08,
+    "price_usd": 210.0,
+    "weight_lb": 2.38,
     "season": "3-season",
     "temp_rating_c": -3.0,
-    "activities": ["backpacking", "hiking", "wild camping"],
+    "activities": [
+      "backpacking",
+      "hiking",
+      "wild camping"
+    ],
     "description": "650 fill-power down bag with a comfort limit around -3C. The dependable British three-season choice.",
     "in_stock": true
   },
@@ -122,11 +152,15 @@
     "name": "Mountain Equipment Glacier 450",
     "brand": "Mountain Equipment",
     "category": "sleeping_bag",
-    "price_usd": 260.00,
-    "weight_kg": 1.02,
+    "price_usd": 260.0,
+    "weight_lb": 2.25,
     "season": "3-season",
     "temp_rating_c": -5.0,
-    "activities": ["backpacking", "winter hiking", "mountaineering"],
+    "activities": [
+      "backpacking",
+      "winter hiking",
+      "mountaineering"
+    ],
     "description": "Hydrophobic down, a touch warmer than most three-season bags. Suits people who sleep cold or camp late in the year.",
     "in_stock": true
   },
@@ -136,10 +170,14 @@
     "brand": "Alpkit",
     "category": "sleeping_bag",
     "price_usd": 199.99,
-    "weight_kg": 0.85,
+    "weight_lb": 1.87,
     "season": "3-season",
     "temp_rating_c": -4.0,
-    "activities": ["backpacking", "wild camping", "bikepacking"],
+    "activities": [
+      "backpacking",
+      "wild camping",
+      "bikepacking"
+    ],
     "description": "Light 750 fill-power down bag with a close-fitting cut. Excellent warmth for the weight if you do not mind a snug bag.",
     "in_stock": true
   },
@@ -148,11 +186,14 @@
     "name": "Sea to Summit Trek TkII",
     "brand": "Sea to Summit",
     "category": "sleeping_bag",
-    "price_usd": 235.00,
-    "weight_kg": 1.00,
+    "price_usd": 235.0,
+    "weight_lb": 2.2,
     "season": "3-season",
     "temp_rating_c": -1.0,
-    "activities": ["backpacking", "hiking"],
+    "activities": [
+      "backpacking",
+      "hiking"
+    ],
     "description": "Roomier cut than most down bags, with a full side zip for venting on mild nights.",
     "in_stock": true
   },
@@ -161,11 +202,14 @@
     "name": "Vango Ultralite Pro 200",
     "brand": "Vango",
     "category": "sleeping_bag",
-    "price_usd": 85.00,
-    "weight_kg": 0.90,
+    "price_usd": 85.0,
+    "weight_lb": 1.98,
     "season": "summer",
     "temp_rating_c": 5.0,
-    "activities": ["backpacking", "car camping"],
+    "activities": [
+      "backpacking",
+      "car camping"
+    ],
     "description": "Synthetic summer bag. Cheap, forgiving of damp, and no use at all below freezing.",
     "in_stock": true
   },
@@ -174,24 +218,29 @@
     "name": "Rab Neutrino 800",
     "brand": "Rab",
     "category": "sleeping_bag",
-    "price_usd": 460.00,
-    "weight_kg": 1.35,
+    "price_usd": 460.0,
+    "weight_lb": 2.98,
     "season": "winter",
     "temp_rating_c": -18.0,
-    "activities": ["mountaineering", "winter hiking"],
+    "activities": [
+      "mountaineering",
+      "winter hiking"
+    ],
     "description": "800 fill-power expedition down bag. Serious winter warmth, priced accordingly.",
     "in_stock": true
   },
-
   {
     "product_id": "pad-thermarest-neoair-xlite",
     "name": "Therm-a-Rest NeoAir XLite NXT",
     "brand": "Therm-a-Rest",
     "category": "sleeping_pad",
-    "price_usd": 195.00,
-    "weight_kg": 0.37,
+    "price_usd": 195.0,
+    "weight_lb": 0.82,
     "season": "3-season",
-    "activities": ["backpacking", "wild camping"],
+    "activities": [
+      "backpacking",
+      "wild camping"
+    ],
     "description": "Inflatable pad with an R-value of 4.5 at well under 400g. Crinkles audibly, which some people hate.",
     "in_stock": true
   },
@@ -200,10 +249,14 @@
     "name": "Therm-a-Rest ProLite",
     "brand": "Therm-a-Rest",
     "category": "sleeping_pad",
-    "price_usd": 110.00,
-    "weight_kg": 0.51,
+    "price_usd": 110.0,
+    "weight_lb": 1.12,
     "season": "3-season",
-    "activities": ["backpacking", "hiking", "car camping"],
+    "activities": [
+      "backpacking",
+      "hiking",
+      "car camping"
+    ],
     "description": "Self-inflating foam pad. Less plush than an air mat but far harder to puncture out of use.",
     "in_stock": true
   },
@@ -212,10 +265,14 @@
     "name": "Sea to Summit Ether Light XT Extreme",
     "brand": "Sea to Summit",
     "category": "sleeping_pad",
-    "price_usd": 165.00,
-    "weight_kg": 0.48,
+    "price_usd": 165.0,
+    "weight_lb": 1.06,
     "season": "winter",
-    "activities": ["winter hiking", "backpacking", "mountaineering"],
+    "activities": [
+      "winter hiking",
+      "backpacking",
+      "mountaineering"
+    ],
     "description": "10cm thick with an R-value over 6. The pad to pair with a winter bag, and good for side sleepers.",
     "in_stock": true
   },
@@ -225,21 +282,27 @@
     "brand": "Alpkit",
     "category": "sleeping_pad",
     "price_usd": 54.99,
-    "weight_kg": 0.72,
+    "weight_lb": 1.59,
     "season": "3-season",
-    "activities": ["car camping", "backpacking"],
+    "activities": [
+      "car camping",
+      "backpacking"
+    ],
     "description": "Budget self-inflating mat. Heavier than the alternatives, and a third of the price.",
     "in_stock": true
   },
-
   {
     "product_id": "stove-jetboil-flash",
     "name": "Jetboil Flash",
     "brand": "Jetboil",
     "category": "stove",
-    "price_usd": 130.00,
-    "weight_kg": 0.371,
-    "activities": ["backpacking", "hiking", "wild camping"],
+    "price_usd": 130.0,
+    "weight_lb": 0.82,
+    "activities": [
+      "backpacking",
+      "hiking",
+      "wild camping"
+    ],
     "description": "Integrated canister system that boils half a litre in around 100 seconds. Boils water brilliantly; simmers poorly.",
     "in_stock": true
   },
@@ -248,9 +311,13 @@
     "name": "MSR PocketRocket 2",
     "brand": "MSR",
     "category": "stove",
-    "price_usd": 55.00,
-    "weight_kg": 0.073,
-    "activities": ["backpacking", "wild camping", "bikepacking"],
+    "price_usd": 55.0,
+    "weight_lb": 0.16,
+    "activities": [
+      "backpacking",
+      "wild camping",
+      "bikepacking"
+    ],
     "description": "73g screw-on canister burner. No integrated pot, so you choose your own, and it actually simmers.",
     "in_stock": true
   },
@@ -259,9 +326,12 @@
     "name": "Primus Lite Plus",
     "brand": "Primus",
     "category": "stove",
-    "price_usd": 110.00,
-    "weight_kg": 0.39,
-    "activities": ["backpacking", "hiking"],
+    "price_usd": 110.0,
+    "weight_lb": 0.86,
+    "activities": [
+      "backpacking",
+      "hiking"
+    ],
     "description": "Integrated system with a proper simmer control, so it cooks as well as it boils.",
     "in_stock": true
   },
@@ -270,9 +340,13 @@
     "name": "Trangia 27-1 UL",
     "brand": "Trangia",
     "category": "stove",
-    "price_usd": 95.00,
-    "weight_kg": 0.83,
-    "activities": ["car camping", "basecamp", "hiking"],
+    "price_usd": 95.0,
+    "weight_lb": 1.83,
+    "activities": [
+      "car camping",
+      "basecamp",
+      "hiking"
+    ],
     "description": "Meths burner in a windproof cookset. Slow and heavy, and nearly impossible to break.",
     "in_stock": true
   },
@@ -282,22 +356,28 @@
     "brand": "Alpkit",
     "category": "stove",
     "price_usd": 29.99,
-    "weight_kg": 0.045,
-    "activities": ["backpacking", "bikepacking", "trail running"],
+    "weight_lb": 0.1,
+    "activities": [
+      "backpacking",
+      "bikepacking",
+      "trail running"
+    ],
     "description": "45g titanium burner. About as light as a stove gets, with a small pot support to match.",
     "in_stock": true
   },
-
   {
     "product_id": "pack-osprey-atmos-65",
     "name": "Osprey Atmos AG 65",
     "brand": "Osprey",
     "category": "backpack",
-    "price_usd": 260.00,
-    "weight_kg": 2.04,
+    "price_usd": 260.0,
+    "weight_lb": 4.5,
     "capacity": 65,
-    "activities": ["backpacking", "hiking"],
-    "description": "Anti-Gravity suspended mesh back. Carries heavy loads unusually well, at the cost of 2kg empty.",
+    "activities": [
+      "backpacking",
+      "hiking"
+    ],
+    "description": "Anti-Gravity suspended mesh back. Carries heavy loads unusually well, at the cost of 4.5 lb empty.",
     "in_stock": true
   },
   {
@@ -305,10 +385,13 @@
     "name": "Gregory Baltoro 75",
     "brand": "Gregory",
     "category": "backpack",
-    "price_usd": 300.00,
-    "weight_kg": 2.30,
+    "price_usd": 300.0,
+    "weight_lb": 5.07,
     "capacity": 75,
-    "activities": ["backpacking", "mountaineering"],
+    "activities": [
+      "backpacking",
+      "mountaineering"
+    ],
     "description": "Large-volume expedition pack with a rotating hipbelt. For multi-week trips or winter loads.",
     "in_stock": true
   },
@@ -317,10 +400,13 @@
     "name": "Lowe Alpine AirZone Trail 35",
     "brand": "Lowe Alpine",
     "category": "backpack",
-    "price_usd": 120.00,
-    "weight_kg": 1.30,
+    "price_usd": 120.0,
+    "weight_lb": 2.87,
     "capacity": 35,
-    "activities": ["hiking", "backpacking"],
+    "activities": [
+      "hiking",
+      "backpacking"
+    ],
     "description": "Ventilated daypack that stretches to an overnight. Sits in the gap between day walks and full backpacking.",
     "in_stock": true
   },
@@ -329,10 +415,13 @@
     "name": "Osprey Talon 22",
     "brand": "Osprey",
     "category": "backpack",
-    "price_usd": 100.00,
-    "weight_kg": 0.79,
+    "price_usd": 100.0,
+    "weight_lb": 1.74,
     "capacity": 22,
-    "activities": ["hiking", "trail running"],
+    "activities": [
+      "hiking",
+      "trail running"
+    ],
     "description": "Close-fitting daypack that moves with you rather than swinging. Day walks and fast hill days.",
     "in_stock": true
   },
@@ -342,21 +431,28 @@
     "brand": "Alpkit",
     "category": "backpack",
     "price_usd": 44.99,
-    "weight_kg": 0.40,
+    "weight_lb": 0.88,
     "capacity": 30,
-    "activities": ["bikepacking", "hiking", "wild swimming"],
+    "activities": [
+      "bikepacking",
+      "hiking",
+      "wild swimming"
+    ],
     "description": "Roll-top drybag pack. Fully waterproof, minimal back system, very light.",
     "in_stock": true
   },
-
   {
     "product_id": "lamp-petzl-actik-core",
     "name": "Petzl Actik Core",
     "brand": "Petzl",
     "category": "headlamp",
-    "price_usd": 55.00,
-    "weight_kg": 0.075,
-    "activities": ["hiking", "backpacking", "winter hiking"],
+    "price_usd": 55.0,
+    "weight_lb": 0.17,
+    "activities": [
+      "hiking",
+      "backpacking",
+      "winter hiking"
+    ],
     "description": "600 lumens on a rechargeable core that swaps for AAAs when it dies mid-trip.",
     "in_stock": true
   },
@@ -365,9 +461,13 @@
     "name": "Black Diamond Spot 400",
     "brand": "Black Diamond",
     "category": "headlamp",
-    "price_usd": 45.00,
-    "weight_kg": 0.086,
-    "activities": ["hiking", "backpacking", "mountaineering"],
+    "price_usd": 45.0,
+    "weight_lb": 0.19,
+    "activities": [
+      "hiking",
+      "backpacking",
+      "mountaineering"
+    ],
     "description": "400 lumens, IPX8 waterproof, with a lock mode so it does not drain in your pack.",
     "in_stock": true
   },
@@ -377,20 +477,27 @@
     "brand": "Alpkit",
     "category": "headlamp",
     "price_usd": 22.99,
-    "weight_kg": 0.048,
-    "activities": ["hiking", "car camping", "trail running"],
+    "weight_lb": 0.11,
+    "activities": [
+      "hiking",
+      "car camping",
+      "trail running"
+    ],
     "description": "Light, cheap, rechargeable. Enough for camp chores and a path, not for route-finding off track.",
     "in_stock": true
   },
-
   {
     "product_id": "filter-sawyer-squeeze",
     "name": "Sawyer Squeeze",
     "brand": "Sawyer",
     "category": "water_filter",
     "price_usd": 39.99,
-    "weight_kg": 0.085,
-    "activities": ["backpacking", "hiking", "wild camping"],
+    "weight_lb": 0.19,
+    "activities": [
+      "backpacking",
+      "hiking",
+      "wild camping"
+    ],
     "description": "0.1 micron hollow-fibre filter that threads onto a bottle. Needs backflushing, otherwise lasts for years.",
     "in_stock": true
   },
@@ -399,9 +506,13 @@
     "name": "Katadyn BeFree 1L",
     "brand": "Katadyn",
     "category": "water_filter",
-    "price_usd": 45.00,
-    "weight_kg": 0.063,
-    "activities": ["backpacking", "trail running", "hiking"],
+    "price_usd": 45.0,
+    "weight_lb": 0.14,
+    "activities": [
+      "backpacking",
+      "trail running",
+      "hiking"
+    ],
     "description": "Collapsible soft flask with a fast-flowing filter. Fastest to drink from, shortest lifespan.",
     "in_stock": true
   },
@@ -411,8 +522,11 @@
     "brand": "LifeStraw",
     "category": "water_filter",
     "price_usd": 29.99,
-    "weight_kg": 0.052,
-    "activities": ["hiking", "backpacking"],
+    "weight_lb": 0.11,
+    "activities": [
+      "hiking",
+      "backpacking"
+    ],
     "description": "Compact personal filter for topping up from streams on the move.",
     "in_stock": false
   },
@@ -421,22 +535,28 @@
     "name": "MSR Guardian Purifier",
     "brand": "MSR",
     "category": "water_filter",
-    "price_usd": 350.00,
-    "weight_kg": 0.49,
-    "activities": ["mountaineering", "basecamp"],
+    "price_usd": 350.0,
+    "weight_lb": 1.08,
+    "activities": [
+      "mountaineering",
+      "basecamp"
+    ],
     "description": "Self-cleaning pump purifier that removes viruses as well as bacteria. Overkill for UK streams.",
     "in_stock": true
   },
-
   {
     "product_id": "jacket-rab-microlight-alpine",
     "name": "Rab Microlight Alpine Jacket",
     "brand": "Rab",
     "category": "insulation",
-    "price_usd": 200.00,
-    "weight_kg": 0.44,
+    "price_usd": 200.0,
+    "weight_lb": 0.97,
     "season": "3-season",
-    "activities": ["hiking", "backpacking", "winter hiking"],
+    "activities": [
+      "hiking",
+      "backpacking",
+      "winter hiking"
+    ],
     "description": "700 fill-power recycled down with a helmet-compatible hood. The default British hill down jacket.",
     "in_stock": true
   },
@@ -445,10 +565,13 @@
     "name": "Mountain Equipment Particle Hooded Jacket",
     "brand": "Mountain Equipment",
     "category": "insulation",
-    "price_usd": 180.00,
-    "weight_kg": 0.39,
+    "price_usd": 180.0,
+    "weight_lb": 0.86,
     "season": "3-season",
-    "activities": ["hiking", "backpacking"],
+    "activities": [
+      "hiking",
+      "backpacking"
+    ],
     "description": "Synthetic insulation that keeps working when damp. The safer choice for wet British trips.",
     "in_stock": true
   },
@@ -457,10 +580,14 @@
     "name": "Patagonia Nano Puff Hoody",
     "brand": "Patagonia",
     "category": "insulation",
-    "price_usd": 220.00,
-    "weight_kg": 0.34,
+    "price_usd": 220.0,
+    "weight_lb": 0.75,
     "season": "3-season",
-    "activities": ["hiking", "trail running", "backpacking"],
+    "activities": [
+      "hiking",
+      "trail running",
+      "backpacking"
+    ],
     "description": "Light synthetic midlayer that packs into its own pocket. Wind resistant, not especially warm.",
     "in_stock": true
   },
@@ -470,9 +597,13 @@
     "brand": "Alpkit",
     "category": "insulation",
     "price_usd": 149.99,
-    "weight_kg": 0.36,
+    "weight_lb": 0.79,
     "season": "3-season",
-    "activities": ["hiking", "backpacking", "bikepacking"],
+    "activities": [
+      "hiking",
+      "backpacking",
+      "bikepacking"
+    ],
     "description": "750 fill-power down hoody at a direct-sales price. Warm for the weight, thin outer fabric.",
     "in_stock": true
   },
@@ -481,10 +612,13 @@
     "name": "Rab Positron Pro Jacket",
     "brand": "Rab",
     "category": "insulation",
-    "price_usd": 400.00,
-    "weight_kg": 0.72,
+    "price_usd": 400.0,
+    "weight_lb": 1.59,
     "season": "winter",
-    "activities": ["mountaineering", "winter hiking"],
+    "activities": [
+      "mountaineering",
+      "winter hiking"
+    ],
     "description": "800 fill-power belay jacket for standing still in the cold. Too warm to walk in.",
     "in_stock": true
   }

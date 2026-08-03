@@ -20,15 +20,29 @@ from langchain_core.tracers.schemas import Run
 from langgraph.store.base import BaseStore
 from trustcall import create_extractor
 
+from app.catalog import product_by_id
 from app.llm import model
-from app.schemas import GearNeed, MemoryRecord, TripPlan, UserProfile
+from app.schemas import CandidateProduct, GearNeed, MemoryRecord, TripPlan, UserProfile
 
 PROFILE_KEY = "main"
 TRIP_KEY = "current"
 
 
+def _safe_label(user_id: str) -> str:
+    """Encode a user id so it is legal as a store namespace label.
+
+    Store namespaces reject periods and empty labels, but the most natural customer id is
+    an email address. Escaping rather than stripping keeps the mapping one-to-one: '%' is
+    escaped first, so 'a.b@x.com' and a literal 'a%2Eb@x%2Ecom' can never collide on the
+    same namespace. The customer's real id is what the API reports back; this encoding is
+    only ever seen inside the store.
+    """
+    encoded = user_id.strip().replace("%", "%25").replace(".", "%2E")
+    return encoded or "anonymous"
+
+
 def _namespace(record: MemoryRecord, user_id: str) -> tuple[str, str]:
-    return (record, user_id)
+    return (record, _safe_label(user_id))
 
 
 # -------------------------------------------------------------
@@ -57,9 +71,13 @@ said. A field with no evidence behind it stays null: an empty field is correct, 
 plausible guess is a false record the store will act on later. Do not infer budget from \
 experience, or a preference from one product they happened to like.
 
+Null means null. Do not write 0, an empty string, or placeholder text in place of \
+something you were not told — a weight limit of 0 reads as "carry nothing" and will throw \
+out every product in the catalog.
+
 Your own assessment is the exception, and is required rather than optional. Every \
 candidate product needs a fit_reason drawn from its catalog specs — why this item suits \
-this customer and this trip, e.g. "1.9kg, inside their 2kg limit, 2-person, 3-season". \
+this customer and this trip, e.g. "4.2 lb, inside their 4.5 lb limit, 2-person, 3-season". \
 That is your judgement to make, not something the customer has to say first.
 
 For gear needs specifically: keep every candidate product that is already recorded, \
@@ -224,6 +242,129 @@ def get_gear_needs(store: BaseStore, user_id: str) -> list[tuple[str, GearNeed]]
     return [(item.key, GearNeed.model_validate(item.value)) for item in items]
 
 
+def committed_totals(needs: list[tuple[str, GearNeed]]) -> dict[str, Any]:
+    """What the customer has actually chosen: total weight, total cost, and the breakdown.
+
+    Arithmetic the code owns rather than the model. A running total is a pure function of
+    what is already recorded, so asking a model for it buys nothing and risks a dropped
+    line or a mis-transcribed spec — and with one tool call per turn, the call is usually
+    spent on recording anyway. These figures go straight into the prompt, always current.
+    """
+    items: list[dict[str, Any]] = []
+    for _, need in needs:
+        if not need.selected_product_id:
+            continue
+        product = product_by_id(need.selected_product_id)
+        if product is None:
+            continue
+        items.append({
+            "need_id": need.need_id,
+            "product_id": product.product_id,
+            "name": product.name,
+            "weight_lb": product.weight_lb,
+            "price_usd": product.price_usd,
+        })
+
+    return {
+        "weight_lb": round(sum(i["weight_lb"] or 0 for i in items), 2),
+        "cost_usd": round(sum(i["price_usd"] or 0 for i in items), 2),
+        "items": items,
+        # Weight is only trustworthy if every chosen product has one on file.
+        "unweighed": [i["name"] for i in items if i["weight_lb"] is None],
+    }
+
+
+def carry_limit(trip: TripPlan | None, fallback: float) -> float:
+    """The weight ceiling in force: the customer's own if they set one, else the fallback."""
+    if trip is not None and trip.max_carry_weight_lb:
+        return trip.max_carry_weight_lb
+    return fallback
+
+
+def drop_selection(store: BaseStore, user_id: str, need_id: str, reason: str) -> bool:
+    """Un-choose a product, recording why. Returns False if the need is not found."""
+    namespace = _namespace("gear_needs", user_id)
+    item = store.get(namespace, need_id)
+    if item is None:
+        return False
+
+    need = GearNeed.model_validate(item.value)
+    dropped = need.selected_product_id
+    need.selected_product_id = None
+    need.status = "exploring"
+    for candidate in need.candidates:
+        if candidate.product_id == dropped:
+            candidate.status = "eliminated"
+            candidate.eliminated_reason = reason
+    store.put(namespace, need_id, need.model_dump())
+    return True
+
+
+def swap_selection(store: BaseStore, user_id: str, need_id: str, product_id: str) -> bool:
+    """Choose a different product for a need. Returns False if need or product is unknown."""
+    namespace = _namespace("gear_needs", user_id)
+    item = store.get(namespace, need_id)
+    product = product_by_id(product_id)
+    if item is None or product is None:
+        return False
+
+    need = GearNeed.model_validate(item.value)
+    need.selected_product_id = product_id
+    need.status = "decided"
+    known = {c.product_id for c in need.candidates}
+    if product_id not in known:
+        need.candidates.append(
+            CandidateProduct(
+                product_id=product.product_id,
+                name=product.name,
+                price_usd=product.price_usd,
+                status="shortlisted",
+                fit_reason="Chosen to bring the pack under its weight limit.",
+            )
+        )
+    for candidate in need.candidates:
+        if candidate.product_id == product_id:
+            candidate.status = "shortlisted"
+            candidate.eliminated_reason = None
+    store.put(namespace, need_id, need.model_dump())
+    return True
+
+
+def lighter_alternatives(needs: list[tuple[str, GearNeed]]) -> dict[str, list[dict[str, Any]]]:
+    """Per need, the already-discussed candidates lighter than the chosen product.
+
+    Offered with the interrupt so the customer can trade down without another search.
+    """
+    options: dict[str, list[dict[str, Any]]] = {}
+    for _, need in needs:
+        chosen = product_by_id(need.selected_product_id or "")
+        if chosen is None or chosen.weight_lb is None:
+            continue
+        lighter = []
+        for candidate in need.candidates:
+            alt = product_by_id(candidate.product_id)
+            if alt is None or alt.weight_lb is None or alt.product_id == chosen.product_id:
+                continue
+            if alt.weight_lb < chosen.weight_lb:
+                lighter.append({
+                    "product_id": alt.product_id,
+                    "name": alt.name,
+                    "weight_lb": alt.weight_lb,
+                    "price_usd": alt.price_usd,
+                    "saves_lb": round(chosen.weight_lb - alt.weight_lb, 2),
+                })
+        if lighter:
+            options[need.need_id] = sorted(lighter, key=lambda o: -o["saves_lb"])
+    return options
+
+
+def set_carry_limit(store: BaseStore, user_id: str, limit_lb: float) -> None:
+    """Raise or lower the trip's pack-weight limit."""
+    trip = get_trip(store, user_id) or TripPlan()
+    trip.max_carry_weight_lb = limit_lb
+    store.put(_namespace("trip", user_id), TRIP_KEY, trip.model_dump())
+
+
 def read_all(store: BaseStore, user_id: str) -> dict[str, Any]:
     """Everything remembered about a user, for the memory endpoint."""
     profile = get_profile(store, user_id)
@@ -382,19 +523,49 @@ def _describe_profile(profile: UserProfile | None) -> str:
     return "\n".join(f"- {part}" for part in parts) if parts else "Nothing recorded yet."
 
 
-def _describe_trip(trip: TripPlan | None) -> str:
-    if trip is None:
-        return "Nothing recorded yet."
-    fields = {
-        "Destination": trip.destination,
-        "Starts": trip.start_date,
-        "Nights": trip.nights,
-        "Party size": trip.party_size,
-        "Season": trip.season,
-        "Travel mode": trip.travel_mode,
-        "Conditions": trip.expected_conditions,
-    }
-    parts = [f"- {label}: {value}" for label, value in fields.items() if value is not None]
+def _describe_trip(
+    trip: TripPlan | None, needs: list[tuple[str, GearNeed]], fallback_limit: float
+) -> str:
+    fields: dict[str, Any] = {}
+    if trip is not None:
+        fields = {
+            "Destination": trip.destination,
+            "Starts": trip.start_date,
+            "Nights": trip.nights,
+            "Party size": trip.party_size,
+            "Season": trip.season,
+            "Travel mode": trip.travel_mode,
+            "Conditions": trip.expected_conditions,
+            # A pack limit of 0 means "not given", never "carry nothing", so it is
+            # filtered out below along with blanks rather than shown as a constraint.
+            "Max pack weight": (
+                f"{trip.max_carry_weight_lb} lb total" if trip.max_carry_weight_lb else None
+            ),
+        }
+
+    # Totals are computed here, not asked of the model — see committed_totals.
+    totals = committed_totals(needs)
+    if totals["items"]:
+        breakdown = ", ".join(
+            f"{i['name']} {i['weight_lb']} lb" if i["weight_lb"] is not None
+            else f"{i['name']} (weight unknown)"
+            for i in totals["items"]
+        )
+        fields["Chosen so far"] = f"{breakdown} — ${totals['cost_usd']:.2f} total"
+
+        limit = carry_limit(trip, fallback_limit)
+        remaining = round(limit - totals["weight_lb"], 2)
+        line = f"{totals['weight_lb']} lb of {limit} lb"
+        line += f" — {remaining} lb still spare" if remaining >= 0 else f" — {abs(remaining)} lb OVER"
+        if totals["unweighed"]:
+            line += f" (excludes {', '.join(totals['unweighed'])}, no weight on file)"
+        fields["Pack weight"] = line
+
+    parts = [
+        f"- {label}: {value}"
+        for label, value in fields.items()
+        if value is not None and value != ""
+    ]
     return "\n".join(parts) if parts else "Nothing recorded yet."
 
 
@@ -413,7 +584,7 @@ def _describe_gear_needs(needs: list[tuple[str, GearNeed]]) -> str:
         for candidate in need.candidates:
             detail = f"    - [{candidate.status}] {candidate.name} ({candidate.product_id})"
             if candidate.price_usd is not None:
-                detail += f" £{candidate.price_usd:.2f}"
+                detail += f" ${candidate.price_usd:.2f}"
             reason = candidate.eliminated_reason or candidate.fit_reason
             if reason:
                 detail += f" — {reason}"
@@ -422,7 +593,7 @@ def _describe_gear_needs(needs: list[tuple[str, GearNeed]]) -> str:
     return "\n".join(blocks)
 
 
-def render_memory_prompt(store: BaseStore, user_id: str) -> str:
+def render_memory_prompt(store: BaseStore, user_id: str, fallback_limit: float) -> str:
     """The remembered context injected into every agent turn.
 
     Writing memory is pointless unless it comes back into the conversation; this is that
@@ -438,7 +609,16 @@ How to work:
 - Ask about what actually drives the choice — conditions, how far they carry it, whether \
 they sleep cold, what they already own — but no more than a couple of questions at a time.
 - When you rule a product out, say why in plain terms, and record it.
-- Prices are in USD.
+- Prices are in USD, weights in lb.
+- Do not do arithmetic yourself. The running pack weight, the total cost and the weight \
+still spare are computed for you and shown under CURRENT TRIP below — quote those figures, \
+do not recompute or estimate them. For a what-if over items that are not chosen catalog \
+products ("what if I add 3 days of food?"), call calculate_gear_weight rather than adding \
+up in your head.
+- A max pack weight is a budget for the whole kit, not a limit on any single item. Only \
+that trip's limit applies — if none is recorded, do not assume one, and do not carry one \
+over from an earlier trip. When it is getting tight, say so and offer the lighter option \
+rather than quietly dropping something they wanted.
 
 Keeping records (call the MemoryRouter tool):
 - 'profile' when they reveal something durable about themselves: activities, experience, \
@@ -468,7 +648,7 @@ CUSTOMER PROFILE:
 {_describe_profile(get_profile(store, user_id))}
 
 CURRENT TRIP:
-{_describe_trip(get_trip(store, user_id))}
+{_describe_trip(get_trip(store, user_id), get_gear_needs(store, user_id), fallback_limit)}
 
 GEAR NEEDS AND PRODUCTS IN PLAY:
 {_describe_gear_needs(get_gear_needs(store, user_id))}"""

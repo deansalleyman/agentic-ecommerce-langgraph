@@ -25,6 +25,11 @@ CATEGORIES: list[str] = sorted({product.category for product in CATALOG})
 _MAX_RESULTS = 5
 
 
+def product_by_id(product_id: str) -> Product | None:
+    """Plain lookup, for code that needs a product without going through the tool."""
+    return _BY_ID.get(product_id)
+
+
 def _summarize(product: Product) -> dict[str, Any]:
     """The view the model sees — full specs come from get_product."""
     summary: dict[str, Any] = {
@@ -36,7 +41,7 @@ def _summarize(product: Product) -> dict[str, Any]:
         "in_stock": product.in_stock,
         "description": product.description,
     }
-    for field in ("weight_kg", "season", "capacity", "temp_rating_c"):
+    for field in ("weight_lb", "season", "capacity", "temp_rating_c"):
         value = getattr(product, field)
         if value is not None:
             summary[field] = value
@@ -47,7 +52,7 @@ def _summarize(product: Product) -> dict[str, Any]:
 def search_products(
     category: str,
     max_price_usd: float | None = None,
-    max_weight_kg: float | None = None,
+    max_weight_lb: float | None = None,
     season: str | None = None,
     min_capacity: int | None = None,
     activity: str | None = None,
@@ -60,7 +65,7 @@ def search_products(
         category: One of tent, sleeping_bag, sleeping_pad, stove, backpack, headlamp,
             water_filter, insulation.
         max_price_usd: Upper price limit in USD.
-        max_weight_kg: Upper weight limit in kg. Matters for backpacking, not car camping.
+        max_weight_lb: Upper weight limit in lb. Matters for backpacking, not car camping.
         season: summer, 3-season or winter. Products rated for harsher conditions than
             asked for are included; lighter-rated ones are not.
         min_capacity: Minimum people (tents) or litres (backpacks).
@@ -80,8 +85,8 @@ def search_products(
             continue
         if max_price_usd is not None and product.price_usd > max_price_usd:
             continue
-        if max_weight_kg is not None and (
-            product.weight_kg is None or product.weight_kg > max_weight_kg
+        if max_weight_lb is not None and (
+            product.weight_lb is None or product.weight_lb > max_weight_lb
         ):
             continue
         if wanted_rank is not None and (
