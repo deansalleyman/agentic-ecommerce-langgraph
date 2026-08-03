@@ -21,7 +21,7 @@ load_env_file()
 import os  # noqa: E402
 from typing import Annotated, Any, Callable, Literal, Sequence, TypedDict  # noqa: E402
 
-from langchain_core.messages import AnyMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage  # noqa: E402
+from langchain_core.messages import RemoveMessage, SystemMessage, AnyMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage  # noqa: E402
 from langchain_core.runnables import RunnableConfig  # noqa: E402
 from langchain_core.tools import tool  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
@@ -113,15 +113,33 @@ def call_grok_agent(state: AgentState, config: RunnableConfig, store: BaseStore)
     """Passes the conversation, plus everything remembered about the customer, to Grok."""
     model_with_tools = require_model().bind_tools(bindable_tools, parallel_tool_calls=False)
 
+    # Get summary if it exists
+    summary = state.get("summary", "")
+
+    # If there is summary, then we add it
+    if summary:
+        
+        # Add summary to system message
+        system_message = f"Summary of conversation earlier: {summary}"
+
+        # Append summary to any newer messages
+        messages = [SystemMessage(content=system_message)] + list(state["messages"])
+    
+    else:
+        messages = state["messages"]
+
     user_id = _user_id(config)
     system_prompt = SystemMessage(
         content=memory.render_memory_prompt(store, user_id, MAX_CARGO_WEIGHT_LB)
     )
-    response = model_with_tools.invoke([system_prompt, *state["messages"]])
+
+
+
+    response = model_with_tools.invoke([system_prompt, *messages])
 
     original_query = state.get("original_query", "")
-    existing_summary = state.get("summary", "")
-    summary = existing_summary or f"Handled request: {original_query}"
+
+   
     current_topic = state.get("current_topic") or original_query or "general"
     output = normalize_content(getattr(response, "content", ""))
 
@@ -134,14 +152,44 @@ def call_grok_agent(state: AgentState, config: RunnableConfig, store: BaseStore)
         "last_memory_update": None,
     }
 
+def summarize_conversation_node(state: AgentState):
+
+    model = require_model()
+    
+    # First, we get any existing summary
+    summary = state.get("summary", "")
+
+    # Create our summarization prompt 
+    if summary:
+        
+        # A summary already exists
+        summary_message = (
+            f"This is summary of the conversation to date: {summary}\n\n"
+            "Extend the summary by taking into account the new messages above:"
+        )
+        
+    else:
+        summary_message = "Create a summary of the conversation above:"
+
+    # Add prompt to our history
+    messages = list(state["messages"]) + [HumanMessage(content=summary_message)]
+    response = model.invoke(messages)
+    
+    # Delete all but the 2 most recent messages
+    delete_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-2]]
+    return {"summary": response.content, "messages": delete_messages}
 
 def should_continue(
     state: AgentState,
-) -> Literal["update_profile", "update_trip", "update_gear_needs", "tools", "__end__"]:
-    """Routes on what the agent asked for: a memory write, a tool, or nothing."""
+) -> Literal["update_profile", "update_trip", "update_gear_needs", "tools", "summarize_conversation", "__end__"]:
+    """Routes on what the agent asked for: a memory write, a tool, or nothing. also summarizes message history"""
     messages = state.get("messages", [])
     if not messages:
         return "__end__"
+
+     # If there are more than six messages, then we summarize the conversation
+    if len(messages) > 2:
+        return "summarize_conversation"
 
     last_message = messages[-1]
     router = _router_call(last_message)
@@ -320,6 +368,7 @@ workflow.add_node("weight_review", weight_review_node)
 workflow.add_node("update_profile", update_profile_node)
 workflow.add_node("update_trip", update_trip_node)
 workflow.add_node("update_gear_needs", update_gear_needs_node)
+workflow.add_node("summarize_conversation", summarize_conversation_node)
 
 workflow.add_edge(START, "agent")
 workflow.add_conditional_edges("agent", should_continue)
