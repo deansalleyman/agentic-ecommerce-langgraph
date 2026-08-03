@@ -593,13 +593,28 @@ def _describe_gear_needs(needs: list[tuple[str, GearNeed]]) -> str:
     return "\n".join(blocks)
 
 
-def render_memory_prompt(store: BaseStore, user_id: str, fallback_limit: float) -> str:
+def render_memory_prompt(
+    store: BaseStore, user_id: str, fallback_limit: float, summary: str = ""
+) -> str:
     """The remembered context injected into every agent turn.
 
     Writing memory is pointless unless it comes back into the conversation; this is that
     half. It also tells the agent when to call the router, which is what keeps the records
     growing over a conversation.
+
+    Two kinds of recall, deliberately assembled together so there is one place to look:
+    the durable records from the store, and `summary` — the turns compaction has already
+    dropped from the transcript. The summary is thread-scoped and transient; the records
+    outlive the conversation.
     """
+    # Only rendered once there is something to recall, so an uncompacted conversation
+    # carries no empty heading.
+    earlier = (
+        f"\n\nEARLIER IN THIS CONVERSATION (older turns, summarised):\n{summary.strip()}"
+        if summary.strip()
+        else ""
+    )
+
     return f"""You are a shopping assistant for an online camping and outdoor store. You \
 help customers choose gear for real trips: ask about the trip and how they camp, search \
 the catalog, and narrow the options down with them until they have decided.
@@ -642,7 +657,7 @@ Never present or discuss products you have not recorded. After a record is saved
 told exactly what changed — mention it to the customer briefly, in your own words, as part \
 of your reply.
 
-=== What you already know about this customer ===
+=== What you already know about this customer ==={earlier}
 
 CUSTOMER PROFILE:
 {_describe_profile(get_profile(store, user_id))}

@@ -23,7 +23,9 @@ cp .env.example .env
 | --- | --- | --- |
 | `XAI_API_KEY` | yes | Authenticates the Grok model. The graph raises at runtime without it. |
 | `XAI_MODEL` | no | Model name, defaults to `grok-4`. |
-| `MAX_CARGO_WEIGHT_LB` | no | Weight above which a run pauses for human review, defaults to `220`. |
+| `MAX_CARGO_WEIGHT_LB` | no | Fallback pack-weight limit when a trip has none of its own, defaults to `220`. |
+| `SUMMARIZE_AFTER_MESSAGES` | no | Transcript length that triggers compaction, defaults to `12`. |
+| `SUMMARY_KEEP_MESSAGES` | no | Recent messages kept when compacting, defaults to `4`. |
 | `LANGSMITH_TRACING` | for tracing | Set to `true` to send traces to LangSmith. |
 | `LANGSMITH_API_KEY` | for tracing / Studio | From https://smith.langchain.com → Settings → API Keys. |
 | `LANGSMITH_PROJECT` | no | Project the traces land in, defaults to `default`. |
@@ -75,6 +77,8 @@ The response is a Server-Sent Events stream of five event types:
 - `message` — one per message a node produced, with `node`, `type`, `content` and any `tool_calls`
 - `memory` — a record was written: `record`, the agent's `reason`, and `changes`, a list of
   the individual edits applied (see [Memory](#memory) below)
+- `compacted` — older turns were summarised and dropped from the transcript, with `dropped`
+  giving the count (see [Compaction](#compaction) below)
 - `interrupt` — the graph paused for human input (see below); no further events until you resume
 - `done` — carries the full `react` trace: `react.steps` and `react.final_answer`
 
@@ -196,6 +200,28 @@ Setting `MemoryRouter` aside, nothing is extracted on turns where the agent does
 it, so an ordinary chat turn costs no extra model call.
 
 Threads live in memory (`InMemorySaver`) and are lost when the server restarts.
+
+## Compaction
+
+The whole transcript is re-sent to the model on every agent turn, so a long shopping
+conversation gets steadily more expensive. Once it passes `SUMMARIZE_AFTER_MESSAGES`, the
+`summarize_conversation` node folds the older turns into `state["summary"]`, drops them, and
+that summary is prepended to later turns instead. The client sees a `compacted` event.
+
+Two things make it safe rather than merely cheap:
+
+**It runs only where a turn would otherwise end.** Compaction is checked *after* the router
+and tool branches in `should_continue`. Intercepting a pending tool call to summarise
+instead would leave an AI message whose tool call never gets a `ToolMessage`, and the next
+model call fails on the malformed history.
+
+**It cuts on a safe boundary.** `_safe_cut` moves the cut forward to a human turn or a plain
+AI reply, never between a tool request and its result — either half surviving alone is
+invalid. If that leaves nothing to drop, the node returns without calling the model at all,
+rather than paying for a summary that removes zero messages.
+
+Long-term memory is unaffected: profile, trip and gear needs live in the store, not the
+transcript, so compaction never loses what was chosen or ruled out.
 
 ## Using LangSmith
 

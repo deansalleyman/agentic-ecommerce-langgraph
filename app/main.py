@@ -103,7 +103,18 @@ def _stream_graph(graph_input: Any, thread_id: str) -> StreamingResponse:
                     if memory_update:
                         yield f"data: {json.dumps({'event': 'memory', **memory_update})}\n\n"
 
-                    for msg in update.get("messages") or []:
+                    messages = update.get("messages") or []
+
+                    # Compaction returns one RemoveMessage per dropped turn. Those are
+                    # bookkeeping, not conversation — a client rendering them would show a
+                    # run of blank bubbles. Report the compaction once instead.
+                    removals = [m for m in messages if getattr(m, "type", "") == "remove"]
+                    if removals:
+                        yield f"data: {json.dumps({'event': 'compacted', 'node': node_name, 'dropped': len(removals)})}\n\n"
+
+                    for msg in messages:
+                        if getattr(msg, "type", "") == "remove":
+                            continue
                         payload: dict[str, Any] = {
                             "event": "message",
                             "node": node_name,

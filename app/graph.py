@@ -21,11 +21,18 @@ load_env_file()
 import os  # noqa: E402
 from typing import Annotated, Any, Callable, Literal, Sequence, TypedDict  # noqa: E402
 
-from langchain_core.messages import RemoveMessage, SystemMessage, AnyMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage  # noqa: E402
+from langchain_core.messages import (  # noqa: E402
+    AnyMessage,
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import RunnableConfig  # noqa: E402
 from langchain_core.tools import tool  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
-from langgraph.graph import START, StateGraph, add_messages  # noqa: E402
+from langgraph.graph import END, START, StateGraph, add_messages  # noqa: E402
 from langgraph.prebuilt import ToolNode  # noqa: E402
 from langgraph.store.base import BaseStore  # noqa: E402
 from langgraph.store.memory import InMemoryStore  # noqa: E402
@@ -41,6 +48,11 @@ from app.schemas import GearItem, MemoryRouter  # noqa: E402
 MAX_CARGO_WEIGHT_LB: float = float(os.getenv("MAX_CARGO_WEIGHT_LB", "220"))
 
 DEFAULT_USER_ID = "anonymous"
+
+# Compaction. The whole transcript is re-sent on every agent turn, so a long shopping
+# conversation gets expensive; past this many messages the tail is summarised and dropped.
+SUMMARIZE_AFTER_MESSAGES: int = int(os.getenv("SUMMARIZE_AFTER_MESSAGES", "12"))
+SUMMARY_KEEP_MESSAGES: int = int(os.getenv("SUMMARY_KEEP_MESSAGES", "4"))
 
 
 class AgentState(TypedDict):
@@ -113,33 +125,18 @@ def call_grok_agent(state: AgentState, config: RunnableConfig, store: BaseStore)
     """Passes the conversation, plus everything remembered about the customer, to Grok."""
     model_with_tools = require_model().bind_tools(bindable_tools, parallel_tool_calls=False)
 
-    # Get summary if it exists
+    # Everything the model is told about this customer — stored records and the summary of
+    # any turns compaction has already dropped — is assembled in one place.
     summary = state.get("summary", "")
-
-    # If there is summary, then we add it
-    if summary:
-        
-        # Add summary to system message
-        system_message = f"Summary of conversation earlier: {summary}"
-
-        # Append summary to any newer messages
-        messages = [SystemMessage(content=system_message)] + list(state["messages"])
-    
-    else:
-        messages = state["messages"]
-
-    user_id = _user_id(config)
     system_prompt = SystemMessage(
-        content=memory.render_memory_prompt(store, user_id, MAX_CARGO_WEIGHT_LB)
+        content=memory.render_memory_prompt(
+            store, _user_id(config), MAX_CARGO_WEIGHT_LB, summary=summary
+        )
     )
 
-
-
-    response = model_with_tools.invoke([system_prompt, *messages])
+    response = model_with_tools.invoke([system_prompt, *state["messages"]])
 
     original_query = state.get("original_query", "")
-
-   
     current_topic = state.get("current_topic") or original_query or "general"
     output = normalize_content(getattr(response, "content", ""))
 
@@ -152,44 +149,79 @@ def call_grok_agent(state: AgentState, config: RunnableConfig, store: BaseStore)
         "last_memory_update": None,
     }
 
-def summarize_conversation_node(state: AgentState):
+def _safe_cut(messages: Sequence[BaseMessage], keep: int) -> int:
+    """Index of the first message to keep, moved forward to a safe boundary.
 
-    model = require_model()
-    
-    # First, we get any existing summary
+    Cutting at a fixed offset can land between an AI message requesting a tool and the
+    ToolMessage answering it. Whichever half survives is then malformed — an orphan tool
+    result, or a request nothing ever answered — and the next model call fails. Only a
+    human turn or a plain AI reply is a safe place to start.
+    """
+    if len(messages) <= keep:
+        return 0
+
+    cut = len(messages) - keep
+    while cut < len(messages):
+        message = messages[cut]
+        kind = getattr(message, "type", None)
+        if kind == "human":
+            break
+        if kind == "ai" and not getattr(message, "tool_calls", None):
+            break
+        cut += 1
+    return cut
+
+
+def summarize_conversation_node(state: AgentState):
+    """Fold older turns into `summary` and drop them from the transcript.
+
+    Runs at the end of a turn, never in place of routing: a memory write or tool call must
+    reach its node first, or the run stalls with an unanswered tool call.
+    """
+    messages = list(state["messages"])
     summary = state.get("summary", "")
 
-    # Create our summarization prompt 
-    if summary:
-        
-        # A summary already exists
-        summary_message = (
-            f"This is summary of the conversation to date: {summary}\n\n"
-            "Extend the summary by taking into account the new messages above:"
-        )
-        
-    else:
-        summary_message = "Create a summary of the conversation above:"
+    # Work out what would actually be dropped before paying for a summary. The safe
+    # boundary can leave nothing to remove, and summarising to drop zero messages is a
+    # model call bought for nothing.
+    cut = _safe_cut(messages, SUMMARY_KEEP_MESSAGES)
+    delete_messages = [RemoveMessage(id=m.id) for m in messages[:cut] if m.id is not None]
+    if not delete_messages:
+        return {}
 
-    # Add prompt to our history
-    messages = list(state["messages"]) + [HumanMessage(content=summary_message)]
-    response = model.invoke(messages)
-    
-    # Delete all but the 2 most recent messages
-    delete_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-2]]
-    return {"summary": response.content, "messages": delete_messages}
+    model = require_model()
+
+    if summary:
+        instruction = (
+            f"This is a summary of the conversation to date: {summary}\n\n"
+            "Extend it to take account of the newer messages above. Keep what the customer "
+            "asked for, what was chosen or ruled out and why."
+        )
+    else:
+        instruction = (
+            "Summarise the conversation above. Keep what the customer asked for, what was "
+            "chosen or ruled out and why."
+        )
+
+    response = model.invoke([*messages, HumanMessage(content=instruction)])
+
+    return {
+        "summary": normalize_content(getattr(response, "content", "")),
+        "messages": delete_messages,
+    }
 
 def should_continue(
     state: AgentState,
 ) -> Literal["update_profile", "update_trip", "update_gear_needs", "tools", "summarize_conversation", "__end__"]:
-    """Routes on what the agent asked for: a memory write, a tool, or nothing. also summarizes message history"""
+    """Routes on what the agent asked for: a memory write, a tool, or nothing.
+
+    Work in progress always wins. Compaction is checked only where the turn would
+    otherwise end — intercepting a pending tool call to summarise instead would strand it
+    with no ToolMessage, and the next model call would fail on the malformed history.
+    """
     messages = state.get("messages", [])
     if not messages:
         return "__end__"
-
-     # If there are more than six messages, then we summarize the conversation
-    if len(messages) > 2:
-        return "summarize_conversation"
 
     last_message = messages[-1]
     router = _router_call(last_message)
@@ -202,6 +234,10 @@ def should_continue(
 
     if getattr(last_message, "tool_calls", None):
         return "tools"
+
+    # Turn is over: the customer has their answer. Compact before the next one.
+    if len(messages) > SUMMARIZE_AFTER_MESSAGES:
+        return "summarize_conversation"
     return "__end__"
 
 
@@ -381,6 +417,9 @@ workflow.add_edge("update_profile", "agent")
 workflow.add_edge("update_trip", "weight_review")
 workflow.add_edge("update_gear_needs", "weight_review")
 workflow.add_edge("weight_review", "agent")
+# Compaction is the last thing that happens in a turn, so it ends the run rather than
+# looping back — going back to the agent would produce a second reply to the same message.
+workflow.add_edge("summarize_conversation", END)
 
 # Two compilations of the same workflow, because the two runtimes persist differently.
 #
