@@ -274,11 +274,17 @@ def committed_totals(needs: list[tuple[str, GearNeed]]) -> dict[str, Any]:
     }
 
 
-def carry_limit(trip: TripPlan | None, fallback: float) -> float:
-    """The weight ceiling in force: the customer's own if they set one, else the fallback."""
+def carry_limit(trip: TripPlan | None) -> float | None:
+    """The weight ceiling for this trip, or None if the customer has not set one.
+
+    There is no house default. A ceiling nobody agreed to is not a constraint worth
+    enforcing, and stating one in the prompt would assert an allowance the customer never
+    gave. The falsy check also keeps a stray 0 out — that means "not given", never
+    "carry nothing".
+    """
     if trip is not None and trip.max_carry_weight_lb:
         return trip.max_carry_weight_lb
-    return fallback
+    return None
 
 
 def drop_selection(store: BaseStore, user_id: str, need_id: str, reason: str) -> bool:
@@ -523,9 +529,7 @@ def _describe_profile(profile: UserProfile | None) -> str:
     return "\n".join(f"- {part}" for part in parts) if parts else "Nothing recorded yet."
 
 
-def _describe_trip(
-    trip: TripPlan | None, needs: list[tuple[str, GearNeed]], fallback_limit: float
-) -> str:
+def _describe_trip(trip: TripPlan | None, needs: list[tuple[str, GearNeed]]) -> str:
     fields: dict[str, Any] = {}
     if trip is not None:
         fields = {
@@ -553,10 +557,17 @@ def _describe_trip(
         )
         fields["Chosen so far"] = f"{breakdown} — ${totals['cost_usd']:.2f} total"
 
-        limit = carry_limit(trip, fallback_limit)
-        remaining = round(limit - totals["weight_lb"], 2)
-        line = f"{totals['weight_lb']} lb of {limit} lb"
-        line += f" — {remaining} lb still spare" if remaining >= 0 else f" — {abs(remaining)} lb OVER"
+        limit = carry_limit(trip)
+        if limit is None:
+            # No allowance to measure against, so report the total and claim nothing more.
+            line = f"{totals['weight_lb']} lb chosen (no limit set)"
+        else:
+            remaining = round(limit - totals["weight_lb"], 2)
+            line = f"{totals['weight_lb']} lb of {limit} lb"
+            line += (
+                f" — {remaining} lb still spare" if remaining >= 0
+                else f" — {abs(remaining)} lb OVER"
+            )
         if totals["unweighed"]:
             line += f" (excludes {', '.join(totals['unweighed'])}, no weight on file)"
         fields["Pack weight"] = line
@@ -593,9 +604,7 @@ def _describe_gear_needs(needs: list[tuple[str, GearNeed]]) -> str:
     return "\n".join(blocks)
 
 
-def render_memory_prompt(
-    store: BaseStore, user_id: str, fallback_limit: float, summary: str = ""
-) -> str:
+def render_memory_prompt(store: BaseStore, user_id: str, summary: str = "") -> str:
     """The remembered context injected into every agent turn.
 
     Writing memory is pointless unless it comes back into the conversation; this is that
@@ -631,9 +640,13 @@ do not recompute or estimate them. For a what-if over items that are not chosen 
 products ("what if I add 3 days of food?"), call calculate_gear_weight rather than adding \
 up in your head.
 - A max pack weight is a budget for the whole kit, not a limit on any single item. Only \
-that trip's limit applies — if none is recorded, do not assume one, and do not carry one \
-over from an earlier trip. When it is getting tight, say so and offer the lighter option \
-rather than quietly dropping something they wanted.
+that trip's limit applies — there is no house default, so if none is recorded there is no \
+limit, and never carry one over from an earlier trip. When it is getting tight, say so and \
+offer the lighter option rather than quietly dropping something they wanted.
+- If the trip is backpacking and no max pack weight is recorded, ask once — while they are \
+choosing gear, where the weight actually decides the purchase, not up front — whether there \
+is a total weight they want to stay under. If they say there is no limit, let it go and do \
+not ask again. Do not ask at all for car camping, where it does not matter.
 
 Keeping records (call the MemoryRouter tool):
 - 'profile' when they reveal something durable about themselves: activities, experience, \
@@ -663,7 +676,7 @@ CUSTOMER PROFILE:
 {_describe_profile(get_profile(store, user_id))}
 
 CURRENT TRIP:
-{_describe_trip(get_trip(store, user_id), get_gear_needs(store, user_id), fallback_limit)}
+{_describe_trip(get_trip(store, user_id), get_gear_needs(store, user_id))}
 
 GEAR NEEDS AND PRODUCTS IN PLAY:
 {_describe_gear_needs(get_gear_needs(store, user_id))}"""

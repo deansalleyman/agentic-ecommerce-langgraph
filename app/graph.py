@@ -34,6 +34,7 @@ from langchain_core.tools import tool  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 from langgraph.graph import END, START, StateGraph, add_messages  # noqa: E402
 from langgraph.prebuilt import ToolNode  # noqa: E402
+from langgraph.runtime import get_runtime  # noqa: E402
 from langgraph.store.base import BaseStore  # noqa: E402
 from langgraph.store.memory import InMemoryStore  # noqa: E402
 from langgraph.types import interrupt  # noqa: E402
@@ -44,10 +45,16 @@ from app.formatting import normalize_content  # noqa: E402
 from app.llm import require_model  # noqa: E402
 from app.schemas import GearItem, MemoryRouter  # noqa: E402
 
-# Maximum allowed pack weight before the graph pauses for human review
-MAX_CARGO_WEIGHT_LB: float = float(os.getenv("MAX_CARGO_WEIGHT_LB", "220"))
+# Who memory is filed under when a run does not name a customer. Studio does not send a
+# user_id unless you set one, so overriding this is the quickest way to get a clean slate
+# for testing: DEFAULT_USER_ID=test-2 uv run langgraph dev
+DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID", "anonymous")
 
-DEFAULT_USER_ID = "anonymous"
+
+class AssistantContext(TypedDict, total=False):
+    """Per-run settings. Declaring it makes `user_id` an editable field in Studio."""
+
+    user_id: str
 
 # Compaction. The whole transcript is re-sent on every agent turn, so a long shopping
 # conversation gets expensive; past this many messages the tail is summarised and dropped.
@@ -106,7 +113,28 @@ bindable_tools = [*tools, MemoryRouter]
 # 2. Helpers
 # -------------------------------------------------------------
 def _user_id(config: RunnableConfig) -> str:
-    return (config.get("configurable") or {}).get("user_id") or DEFAULT_USER_ID
+    """Whose memory this run reads and writes.
+
+    Checked on both channels because callers reach the graph differently: the FastAPI app
+    passes `configurable`, while Studio and anything using a context schema pass `context`.
+    """
+    from_config = (config.get("configurable") or {}).get("user_id")
+    if from_config:
+        return from_config
+
+    try:
+        context = get_runtime(AssistantContext).context
+    except Exception:  # no runtime outside a graph execution
+        context = None
+    if context:
+        from_context = (
+            context.get("user_id") if isinstance(context, dict)
+            else getattr(context, "user_id", None)
+        )
+        if from_context:
+            return from_context
+
+    return DEFAULT_USER_ID
 
 
 def _router_call(message: Any) -> dict[str, Any] | None:
@@ -129,9 +157,7 @@ def call_grok_agent(state: AgentState, config: RunnableConfig, store: BaseStore)
     # any turns compaction has already dropped — is assembled in one place.
     summary = state.get("summary", "")
     system_prompt = SystemMessage(
-        content=memory.render_memory_prompt(
-            store, _user_id(config), MAX_CARGO_WEIGHT_LB, summary=summary
-        )
+        content=memory.render_memory_prompt(store, _user_id(config), summary=summary)
     )
 
     response = model_with_tools.invoke([system_prompt, *state["messages"]])
@@ -293,7 +319,7 @@ def weight_review_node(state: AgentState, config: RunnableConfig, store: BaseSto
 
     The total is computed from the store — the products they have actually chosen, weighed
     from the catalog — not read off a model's arithmetic. The limit is the trip's own
-    max_carry_weight_lb when they have set one, falling back to MAX_CARGO_WEIGHT_LB.
+    max_carry_weight_lb when they have set one.
 
     Resume via POST /threads/{id}/runs with exactly one of:
         {"command": {"resume": {"swap": {"need_id": "tent", "product_id": "..."}}}}
@@ -311,9 +337,13 @@ def weight_review_node(state: AgentState, config: RunnableConfig, store: BaseSto
         trip = memory.get_trip(store, user_id)
         needs = memory.get_gear_needs(store, user_id)
         totals = memory.committed_totals(needs)
-        limit = memory.carry_limit(trip, MAX_CARGO_WEIGHT_LB)
-        over_by = round(totals["weight_lb"] - limit, 2)
+        limit = memory.carry_limit(trip)
 
+        # No limit, no review: the only ceiling is the one the customer set for this trip.
+        if limit is None:
+            break
+
+        over_by = round(totals["weight_lb"] - limit, 2)
         if over_by <= 0:
             break
 
@@ -397,7 +427,7 @@ def weight_review_node(state: AgentState, config: RunnableConfig, store: BaseSto
 # -------------------------------------------------------------
 # 4. Build
 # -------------------------------------------------------------
-workflow = StateGraph(AgentState)
+workflow = StateGraph(AgentState, context_schema=AssistantContext)
 workflow.add_node("agent", call_grok_agent)
 workflow.add_node("tools", tool_node)
 workflow.add_node("weight_review", weight_review_node)

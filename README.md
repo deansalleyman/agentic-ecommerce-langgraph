@@ -23,7 +23,6 @@ cp .env.example .env
 | --- | --- | --- |
 | `XAI_API_KEY` | yes | Authenticates the Grok model. The graph raises at runtime without it. |
 | `XAI_MODEL` | no | Model name, defaults to `grok-4`. |
-| `MAX_CARGO_WEIGHT_LB` | no | Fallback pack-weight limit when a trip has none of its own, defaults to `220`. |
 | `SUMMARIZE_AFTER_MESSAGES` | no | Transcript length that triggers compaction, defaults to `12`. |
 | `SUMMARY_KEEP_MESSAGES` | no | Recent messages kept when compacting, defaults to `4`. |
 | `LANGSMITH_TRACING` | for tracing | Set to `true` to send traces to LangSmith. |
@@ -88,10 +87,13 @@ keeps the message history, so follow-ups like *"the MSR is too pricey, drop it"*
 **3. Resume a paused run**
 
 The graph pauses when the customer's **chosen** kit goes over the pack-weight limit for the
-trip — their own `max_carry_weight_lb` if they set one, otherwise `MAX_CARGO_WEIGHT_LB`
-(default 220). The total is summed in code from the catalog, never from the model, so the
-review triggers on a figure that is always right. It is checked after a gear decision or a
-change to the limit.
+trip. That limit is the trip's own `max_carry_weight_lb` and nothing else — there is no house
+default, so a trip where the customer never named a limit is never reviewed. The total is
+summed in code from the catalog, never from the model, so the review triggers on a figure
+that is always right. It is checked after a gear decision or a change to the limit.
+
+The assistant asks for a limit once, while gear is being chosen, if the trip is backpacking
+and none is recorded. It does not ask for car camping.
 
 The `interrupt` payload carries what was chosen, how far over it is, and the lighter
 options already discussed for each need:
@@ -272,6 +274,12 @@ curl -N -X POST "http://127.0.0.1:8000/threads/$THREAD_ID/runs" \
 
 Then open https://smith.langchain.com, find the `agentic-ecommerce-langgraph` project in the
 tracing projects list, and open the newest run. You get a root run for the graph with a child
+
+to run local LangSmith accesible 
+```
+uv run langgraph dev --no-browser
+```
+
 span per step:
 
 - `agent` → the `ChatXAI` call, with the full message list sent to Grok — including the
@@ -344,9 +352,24 @@ with no persistence arguments, while `api_graph` (what FastAPI runs) compiles wi
 requests. Same `workflow`, same nodes, two runtimes that persist differently.
 
 Consequences worth knowing: Studio threads and FastAPI threads are separate, so a thread id
-from one path means nothing to the other. And Studio runs carry no `user_id` in their config,
-so memory written from Studio lands under the `anonymous` customer instead of mixing into a
-real one.
+from one path means nothing to the other — and so are their stores, which is why deleting a
+customer through the API does not clear what Studio remembers.
+
+### Starting from a clean slate
+
+A new thread is **not** a fresh customer. Threads hold the transcript; profile, trip and gear
+needs are keyed by `user_id` in the store and outlive any thread by design. Switch customer,
+and everything is new:
+
+| | |
+| --- | --- |
+| In Studio | Open the run's **Configurable** panel and set `user_id`. The graph declares a context schema (`AssistantContext`), so the field is offered there. |
+| For a whole session | `DEFAULT_USER_ID=test-2 uv run langgraph dev` — runs with no `user_id` fall under that name instead of `anonymous`. |
+| Through the API | `curl -X DELETE http://127.0.0.1:8000/users/dean/memory`, or just post threads under a new `user_id`. |
+| Wipe Studio entirely | Stop the server and `rm -rf .langgraph_api/` — its threads *and* store are pickled there, which is why restarting alone does not reset anything. |
+
+`user_id` is read from `configurable` first, then the run context, then `DEFAULT_USER_ID`,
+so the API and Studio can each supply it their own way.
 
 The dev server is independent of `uv run fastapi dev` (port 8000), so you can run both at once.
 Studio writes local state to `.langgraph_api/`, which is gitignored.
