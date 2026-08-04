@@ -152,13 +152,57 @@ Two things persist per customer, keyed by `user_id` and living beyond any single
 | `UserProfile` | `("profile", user_id)` | Activities they do, experience, gear owned, budget, brands, constraints like *sleeps cold* |
 | `TripPlan` | `("trip", user_id)` | Destination, dates, nights, party size, season, conditions |
 | `GearNeed` | `("gear_needs", user_id)` | **One document per thing they are shopping for**, each owning its candidate products |
+| `TripForecast` | `("forecast", user_id)` | Day-by-day Open-Meteo forecast for the trip window. Written by the weather tool in code, never by an extractor |
 
 `GearNeed` is the collection that gets narrowed. Each candidate carries a `status`
 (`candidate` / `shortlisted` / `eliminated`), a `fit_reason`, and — once ruled out — an
 `eliminated_reason`. Eliminated candidates are never deleted: why an option was rejected is
 the useful part of the record, and stops the assistant re-suggesting it.
 
-### How a record gets written
+### Two ways a record gets written
+
+**Conversational facts are extracted.** What the customer says has to be interpreted, so the
+agent asks for a write and a model does the interpreting — the router path below.
+
+**Data from a tool is written in code.** `TripForecast` arrives already structured from
+Open-Meteo, so [weather_forcast_tool](app/weather_forcast.py) writes it to the store itself
+via `InjectedStore` and returns it for the agent to talk about. No router call, no extractor,
+no extra model turn — the write cannot be skipped or garbled.
+
+That is also why the forecast is its own record under `("forecast", user_id)` rather than a
+field on `TripPlan`. The trip extractor is handed the whole `TripPlan` as `existing` on every
+trip update, so a field living there would be fair game to rewrite or drop on an unrelated
+turn. Two writers on one field will eventually disagree, and the model writes last.
+
+The customer's own expectations stay in `TripPlan.expected_conditions` (extracted — genuinely
+conversational). When the two disagree, that is useful signal rather than a conflict:
+*"you said mild, the forecast has lows near freezing."*
+
+**Past the forecast horizon it falls back to history.** Open-Meteo needs no API key and its
+forecast reaches about two weeks. Further out — which is exactly when someone is buying a
+sleeping bag — the tool pulls the *same calendar month a year earlier* from the historical
+archive and stores its monthly average as typical conditions:
+
+```
+TYPICAL CONDITIONS FOR THE TRIP (PAST WEATHER, NOT A FORECAST):
+- NOT A FORECAST. No forecast reaches 2026-12-01, so this is what Big Bear was
+  actually like in December 2025 (31 days on record).
+- Typical night 39.1F, typical day 53.7F
+- Coldest night that month 23.5F, warmest day 65.3F — size warmth against the cold end
+- 3.51 in of precipitation over the month
+```
+
+Which one you got is recorded as `basis: "forecast" | "historical"` on the record itself, not
+just in prompt wording, so a stored value can never be read back as a prediction it never
+was. The heading, the first line and the prompt rule all restate it.
+
+Three details worth knowing: the archive has no chance-of-rain column (ERA5 does not model
+one), so historical days carry measured precipitation only; a trip more than a year out steps
+the sampled year back until it lands on a month that has actually finished; and the coldest
+night on record is reported alongside the average, because a mean hides the night that
+decides the bag.
+
+### How a router-driven record gets written
 
 The agent decides. It has a **router struct**, `MemoryRouter`, bound as a tool but never
 executed as one — a conditional edge reads `update_type` off the call and sends the run to

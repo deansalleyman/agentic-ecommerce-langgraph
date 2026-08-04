@@ -19,7 +19,12 @@ from pydantic import BaseModel, Field
 # -------------------------------------------------------------
 # Router
 # -------------------------------------------------------------
+# What the model may ask to have written. `forecast` is absent on purpose: it is written by
+# the weather tool in code, so the router must never be able to route to it.
 MemoryRecord = Literal["profile", "trip", "gear_needs"]
+
+# Every record the store holds, router-writable or not.
+StoreRecord = Literal["profile", "trip", "gear_needs", "forecast"]
 
 
 class MemoryRouter(BaseModel):
@@ -204,6 +209,67 @@ class GearNeed(BaseModel):
         "the history of the decision is the point, so never drop entries.",
     )
     weight: float | None = Field(default=None, description="Weight of the need in lb.")
+
+
+# -------------------------------------------------------------
+# Forecast — written by the weather tool, never by an extractor
+# -------------------------------------------------------------
+class ForecastDay(BaseModel):
+    """One day of the forecast for a trip."""
+
+    date: str
+    temp_min_f: float | None = None
+    temp_max_f: float | None = None
+    precipitation_in: float | None = None
+    precipitation_chance_pct: int | None = None
+    wind_max_mph: float | None = None
+
+
+class MonthAverage(BaseModel):
+    """What one calendar month was actually like, averaged from the Open-Meteo archive.
+
+    Used when a trip is beyond the forecast horizon. The archive carries measured
+    precipitation but no chance-of-rain — ERA5 does not model one — so there is
+    deliberately no percentage here to mistake for a forecast probability.
+    """
+
+    month: str = Field(description="The month sampled, as YYYY-MM.")
+    days_sampled: int
+    avg_low_f: float | None = None
+    avg_high_f: float | None = None
+    # What warmth decisions actually hinge on: the worst night that month, not the mean.
+    coldest_low_f: float | None = None
+    warmest_high_f: float | None = None
+    total_precip_in: float | None = None
+    max_wind_mph: float | None = None
+
+
+class TripForecast(BaseModel):
+    """Weather for a trip, as fetched from Open-Meteo.
+
+    Deliberately not a field on `TripPlan`. The trip extractor is handed the whole
+    `TripPlan` as `existing` on every trip update, so a field living there would be fair
+    game for the model to rewrite or drop on some unrelated turn. Kept in its own record,
+    written only by the weather tool, it cannot be touched by extraction at all.
+
+    `basis` distinguishes a real forecast from past weather standing in for one. It lives on
+    the record rather than only in prompt wording, so a stored value can never be read back
+    as a prediction it never was.
+    """
+
+    location: str = Field(description="Resolved place name from geocoding.")
+    latitude: float
+    longitude: float
+    start_date: str
+    end_date: str
+    basis: Literal["forecast", "historical"] = "forecast"
+    # Populated on the forecast path only. Per-day rows from another year would invite being
+    # read as a day-by-day prediction, so the historical path leaves this empty.
+    days: list[ForecastDay] = Field(default_factory=list)
+    # Populated on the historical path only.
+    years_sampled: list[int] = Field(default_factory=list)
+    month_average: MonthAverage | None = None
+    source: str = "open-meteo"
 
 
 class GearItem(BaseModel):

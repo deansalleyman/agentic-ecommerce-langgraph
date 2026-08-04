@@ -12,6 +12,7 @@ one candidate to eliminated with a reason — leaves every other candidate untou
 the model to re-emit the whole document instead loses detail and burns tokens.
 """
 
+import datetime
 import json
 from typing import Any, Iterator
 
@@ -22,10 +23,18 @@ from trustcall import create_extractor
 
 from app.catalog import product_by_id
 from app.llm import model
-from app.schemas import CandidateProduct, GearNeed, MemoryRecord, TripPlan, UserProfile
+from app.schemas import (
+    CandidateProduct,
+    GearNeed,
+    StoreRecord,
+    TripForecast,
+    TripPlan,
+    UserProfile,
+)
 
 PROFILE_KEY = "main"
 TRIP_KEY = "current"
+FORECAST_KEY = "current"
 
 
 def _safe_label(user_id: str) -> str:
@@ -41,7 +50,7 @@ def _safe_label(user_id: str) -> str:
     return encoded or "anonymous"
 
 
-def _namespace(record: MemoryRecord, user_id: str) -> tuple[str, str]:
+def _namespace(record: StoreRecord, user_id: str) -> tuple[str, str]:
     return (record, _safe_label(user_id))
 
 
@@ -242,6 +251,20 @@ def get_gear_needs(store: BaseStore, user_id: str) -> list[tuple[str, GearNeed]]
     return [(item.key, GearNeed.model_validate(item.value)) for item in items]
 
 
+def get_forecast(store: BaseStore, user_id: str) -> TripForecast | None:
+    item = store.get(_namespace("forecast", user_id), FORECAST_KEY)
+    return TripForecast.model_validate(item.value) if item else None
+
+
+def set_forecast(store: BaseStore, user_id: str, forecast: TripForecast) -> None:
+    """Record a forecast. Called by the weather tool, never by an extractor.
+
+    The value arrives already structured from the API, so there is nothing for a model to
+    infer — passing it through one could only lose or garble it.
+    """
+    store.put(_namespace("forecast", user_id), FORECAST_KEY, forecast.model_dump())
+
+
 def committed_totals(needs: list[tuple[str, GearNeed]]) -> dict[str, Any]:
     """What the customer has actually chosen: total weight, total cost, and the breakdown.
 
@@ -375,10 +398,12 @@ def read_all(store: BaseStore, user_id: str) -> dict[str, Any]:
     """Everything remembered about a user, for the memory endpoint."""
     profile = get_profile(store, user_id)
     trip = get_trip(store, user_id)
+    forecast = get_forecast(store, user_id)
     return {
         "user_id": user_id,
         "profile": profile.model_dump() if profile else None,
         "trip": trip.model_dump() if trip else None,
+        "forecast": forecast.model_dump() if forecast else None,
         "gear_needs": {key: need.model_dump() for key, need in get_gear_needs(store, user_id)},
     }
 
@@ -388,6 +413,8 @@ def clear_all(store: BaseStore, user_id: str) -> None:
         store.delete(_namespace("profile", user_id), PROFILE_KEY)
     if store.get(_namespace("trip", user_id), TRIP_KEY):
         store.delete(_namespace("trip", user_id), TRIP_KEY)
+    if store.get(_namespace("forecast", user_id), FORECAST_KEY):
+        store.delete(_namespace("forecast", user_id), FORECAST_KEY)
     for key, _ in get_gear_needs(store, user_id):
         store.delete(_namespace("gear_needs", user_id), key)
 
@@ -580,6 +607,79 @@ def _describe_trip(trip: TripPlan | None, needs: list[tuple[str, GearNeed]]) -> 
     return "\n".join(parts) if parts else "Nothing recorded yet."
 
 
+def _forecast_heading(forecast: TripForecast | None) -> str:
+    """The section heading, so a historical record is never filed under 'FORECAST'."""
+    if forecast is not None and forecast.basis == "historical":
+        return "TYPICAL CONDITIONS FOR THE TRIP (PAST WEATHER, NOT A FORECAST):"
+    return "FORECAST FOR THE TRIP:"
+
+
+def _describe_forecast(forecast: TripForecast | None) -> str:
+    """The weather record, with its headline figures worked out here rather than by the model.
+
+    Past weather standing in for a forecast is labelled as such on every line it appears, so
+    there is no reading of this block in which last year's December becomes a prediction.
+    """
+    if forecast is None:
+        return "Nothing fetched yet."
+
+    if forecast.basis == "historical":
+        average = forecast.month_average
+        if average is None:
+            return "Nothing fetched yet."
+
+        month_name = datetime.date(
+            int(average.month[:4]), int(average.month[5:7]), 1
+        ).strftime("%B %Y")
+        lines = [
+            f"- NOT A FORECAST. No forecast reaches {forecast.start_date}, so this is what "
+            f"{forecast.location} was actually like in {month_name} "
+            f"({average.days_sampled} days on record).",
+        ]
+        if average.avg_low_f is not None and average.avg_high_f is not None:
+            lines.append(
+                f"- Typical night {average.avg_low_f}F, typical day {average.avg_high_f}F"
+            )
+        if average.coldest_low_f is not None:
+            lines.append(
+                f"- Coldest night that month {average.coldest_low_f}F, warmest day "
+                f"{average.warmest_high_f}F — size warmth against the cold end, not the average"
+            )
+        if average.total_precip_in is not None:
+            lines.append(f"- {average.total_precip_in} in of precipitation over the month")
+        if average.max_wind_mph is not None:
+            lines.append(f"- Strongest wind {average.max_wind_mph} mph")
+        return "\n".join(lines)
+
+    if not forecast.days:
+        return "Nothing fetched yet."
+
+    lows = [d.temp_min_f for d in forecast.days if d.temp_min_f is not None]
+    highs = [d.temp_max_f for d in forecast.days if d.temp_max_f is not None]
+    wet = [d for d in forecast.days if (d.precipitation_chance_pct or 0) >= 30]
+    winds = [d.wind_max_mph for d in forecast.days if d.wind_max_mph is not None]
+
+    lines = [
+        f"- {forecast.location}, {forecast.start_date} to {forecast.end_date} "
+        f"(source: {forecast.source})"
+    ]
+    if lows and highs:
+        lines.append(f"- Coldest night {min(lows)}F, warmest day {max(highs)}F")
+    if winds:
+        lines.append(f"- Strongest wind {max(winds)} mph")
+    if wet:
+        days = ", ".join(f"{d.date} {d.precipitation_chance_pct}%" for d in wet)
+        lines.append(f"- Rain likely: {days}")
+    else:
+        lines.append("- No day above a 30% chance of rain")
+
+    lines.append("- By day: " + "; ".join(
+        f"{d.date} {d.temp_min_f}-{d.temp_max_f}F, {d.precipitation_chance_pct}% rain"
+        for d in forecast.days
+    ))
+    return "\n".join(lines)
+
+
 def _describe_gear_needs(needs: list[tuple[str, GearNeed]]) -> str:
     if not needs:
         return "Nothing recorded yet."
@@ -639,6 +739,17 @@ still spare are computed for you and shown under CURRENT TRIP below — quote th
 do not recompute or estimate them. For a what-if over items that are not chosen catalog \
 products ("what if I add 3 days of food?"), call calculate_gear_weight rather than adding \
 up in your head.
+- Once you know where and when they are going, call weather_forcast_tool. What it finds is \
+saved automatically and appears in the weather section below; quote it from there rather \
+than re-fetching or recalling it. Use it to justify warmth and waterproofing — a 30F night \
+is the argument for a warmer bag. If it contradicts what they expect, say so plainly rather \
+than going along with either.
+- A real forecast only reaches about two weeks ahead. Past that the tool returns what the \
+same month was actually like a year ago, marked NOT A FORECAST. Say which one you are \
+working from — "no forecast reaches that far out, but last December there ran around 33F at \
+night" — and never present past weather as what the weather will be. Plan warmth against \
+the coldest night on record for that month rather than the average, and remind them a \
+single past year is a guide, not a guarantee.
 - A max pack weight is a budget for the whole kit, not a limit on any single item. Only \
 that trip's limit applies — there is no house default, so if none is recorded there is no \
 limit, and never carry one over from an earlier trip. When it is getting tight, say so and \
@@ -647,14 +758,15 @@ offer the lighter option rather than quietly dropping something they wanted.
 choosing gear, where the weight actually decides the purchase, not up front — whether there \
 is a total weight they want to stay under. If they say there is no limit, let it go and do \
 not ask again. Do not ask at all for car camping, where it does not matter.
+- If the query mentions a location, call the weather_forcast_tool to get the expected weather for the given date period.
 
 Keeping records (call the MemoryRouter tool):
 - 'profile' when they reveal something durable about themselves: activities, experience, \
 gear they own, budget, brands, or a constraint like sleeping cold.
 - 'trip' when they mention where they are going, when, for how long, with how many people, \
-or in what conditions.
+or in what conditions and for weather forecasts.
 - 'gear_needs' when they name something they need, when you rule a product out, or when \
-they choose one.
+they choose one also suggest from weather conditions to suggest suitable gear.
 
 Record before you reply. You can only make one tool call at a time, so the order matters:
 
@@ -677,6 +789,9 @@ CUSTOMER PROFILE:
 
 CURRENT TRIP:
 {_describe_trip(get_trip(store, user_id), get_gear_needs(store, user_id))}
+
+{_forecast_heading(get_forecast(store, user_id))}
+{_describe_forecast(get_forecast(store, user_id))}
 
 GEAR NEEDS AND PRODUCTS IN PLAY:
 {_describe_gear_needs(get_gear_needs(store, user_id))}"""
