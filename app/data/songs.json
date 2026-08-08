@@ -1,0 +1,222 @@
+[
+  {
+    "song_id": "quiet-hours-low-ceiling",
+    "name": "Low Ceiling",
+    "artist": "The Quiet Hours",
+    "genre": "shoegaze",
+    "description": "Buried vocals under three layers of guitar, the drums mixed low and far back. Builds for two minutes and never quite breaks.",
+    "mood": "melancholy",
+    "year": 2023,
+    "duration_sec": 254,
+    "tags": ["reverb", "quiet vocals", "slow build", "rainy day", "guitar"]
+  },
+  {
+    "song_id": "quiet-hours-paper-street",
+    "name": "Paper Street",
+    "artist": "The Quiet Hours",
+    "genre": "shoegaze",
+    "description": "Brighter than the rest of the record. Jangling open chords, a chorus that actually arrives.",
+    "mood": "wistful",
+    "year": 2023,
+    "duration_sec": 198,
+    "tags": ["jangle", "bright", "guitar", "singalong"]
+  },
+  {
+    "song_id": "marisol-ferry-tide-clock",
+    "name": "Tide Clock",
+    "artist": "Marisol Ferry",
+    "genre": "folk",
+    "description": "Voice and nylon-string guitar, recorded in one take with the window open. You can hear a car go past in the second verse.",
+    "mood": "calm",
+    "year": 2024,
+    "duration_sec": 221,
+    "tags": ["acoustic", "intimate", "solo", "quiet", "one take"]
+  },
+  {
+    "song_id": "marisol-ferry-harrow-lane",
+    "name": "Harrow Lane",
+    "artist": "Marisol Ferry",
+    "genre": "folk",
+    "description": "A walking song in 6/8 about leaving somewhere small. Close-harmony vocals on the last chorus.",
+    "mood": "bittersweet",
+    "year": 2022,
+    "duration_sec": 267,
+    "tags": ["acoustic", "harmony", "storytelling", "quiet"]
+  },
+  {
+    "song_id": "nine-volt-crush-radiator",
+    "name": "Radiator",
+    "artist": "Nine Volt Crush",
+    "genre": "punk",
+    "description": "Ninety seconds, one riff, no solo. Recorded loud and left that way.",
+    "mood": "angry",
+    "year": 2025,
+    "duration_sec": 94,
+    "tags": ["fast", "loud", "distortion", "short", "guitar"]
+  },
+  {
+    "song_id": "nine-volt-crush-two-stops-early",
+    "name": "Two Stops Early",
+    "artist": "Nine Volt Crush",
+    "genre": "punk",
+    "description": "Faster than Radiator and half as tidy. Shouted gang vocals on the chorus.",
+    "mood": "restless",
+    "year": 2025,
+    "duration_sec": 118,
+    "tags": ["fast", "loud", "distortion", "short", "gang vocals"]
+  },
+  {
+    "song_id": "adaeze-okoro-sunday-market",
+    "name": "Sunday Market",
+    "artist": "Adaeze Okoro",
+    "genre": "afrobeat",
+    "description": "Horn section over a shuffling two-bar groove. The bass carries the tune and the vocals sit on top of it.",
+    "mood": "joyful",
+    "year": 2024,
+    "duration_sec": 312,
+    "tags": ["horns", "groove", "danceable", "bass", "bright"]
+  },
+  {
+    "song_id": "adaeze-okoro-lagos-at-six",
+    "name": "Lagos at Six",
+    "artist": "Adaeze Okoro",
+    "genre": "afrobeat",
+    "description": "Slower and dubbier. Long instrumental stretch in the middle where the horns drop out entirely.",
+    "mood": "warm",
+    "year": 2024,
+    "duration_sec": 384,
+    "tags": ["horns", "groove", "dub", "long", "instrumental section"]
+  },
+  {
+    "song_id": "still-hollow-birch",
+    "name": "Birch",
+    "artist": "Still Hollow",
+    "genre": "ambient",
+    "description": "Twelve minutes of processed piano and tape hiss. Nothing happens quickly and that is the point.",
+    "mood": "calm",
+    "year": 2021,
+    "duration_sec": 726,
+    "tags": ["instrumental", "piano", "slow", "long", "background", "quiet"]
+  },
+  {
+    "song_id": "still-hollow-frost-on-the-inside",
+    "name": "Frost on the Inside",
+    "artist": "Still Hollow",
+    "genre": "ambient",
+    "description": "Field recordings of a cold morning under a single sustained synth chord.",
+    "mood": "cold",
+    "year": 2022,
+    "duration_sec": 498,
+    "tags": ["instrumental", "field recording", "synth", "slow", "background", "quiet"]
+  },
+  {
+    "song_id": "kestrel-line-signal-fade",
+    "name": "Signal Fade",
+    "artist": "Kestrel Line",
+    "genre": "electronic",
+    "description": "Four-to-the-floor with a detuned lead that drifts sharp on purpose. Peaks late.",
+    "mood": "euphoric",
+    "year": 2025,
+    "duration_sec": 341,
+    "tags": ["danceable", "synth", "build", "club", "loud"]
+  },
+  {
+    "song_id": "kestrel-line-night-bus",
+    "name": "Night Bus",
+    "artist": "Kestrel Line",
+    "genre": "electronic",
+    "description": "Downtempo, heavy on the low end, vocal sample chopped past recognition.",
+    "mood": "moody",
+    "year": 2023,
+    "duration_sec": 289,
+    "tags": ["downtempo", "bass", "sample", "late night", "moody"]
+  },
+  {
+    "song_id": "orla-vance-cheap-seats",
+    "name": "Cheap Seats",
+    "artist": "Orla Vance",
+    "genre": "soul",
+    "description": "Live band, no click track, and a vocal take with an audible crack in the last chorus that they kept.",
+    "mood": "raw",
+    "year": 2024,
+    "duration_sec": 236,
+    "tags": ["live", "vocal", "band", "horns", "warm"]
+  },
+  {
+    "song_id": "orla-vance-tin-roof",
+    "name": "Tin Roof",
+    "artist": "Orla Vance",
+    "genre": "soul",
+    "description": "Organ-led and slow. Closer to gospel than the rest of the record.",
+    "mood": "hopeful",
+    "year": 2022,
+    "duration_sec": 274,
+    "tags": ["organ", "slow", "vocal", "gospel", "warm"]
+  },
+  {
+    "song_id": "brass-tacks-quartet-eighth-avenue",
+    "name": "Eighth Avenue",
+    "artist": "Brass Tacks Quartet",
+    "genre": "jazz",
+    "description": "Hard bop head, then four choruses of trading. Piano drops out for the bass solo.",
+    "mood": "restless",
+    "year": 2023,
+    "duration_sec": 421,
+    "tags": ["instrumental", "improvisation", "horns", "long", "band"]
+  },
+  {
+    "song_id": "brass-tacks-quartet-last-call",
+    "name": "Last Call",
+    "artist": "Brass Tacks Quartet",
+    "genre": "jazz",
+    "description": "A ballad taken very slowly, brushes throughout, muted trumpet on the melody.",
+    "mood": "melancholy",
+    "year": 2023,
+    "duration_sec": 358,
+    "tags": ["instrumental", "slow", "quiet", "late night", "brushes"]
+  },
+  {
+    "song_id": "pale-transit-glasshouse",
+    "name": "Glasshouse",
+    "artist": "Pale Transit",
+    "genre": "post-rock",
+    "description": "Seven minutes with no vocals. Two guitars circling each other until the drums arrive at four.",
+    "mood": "yearning",
+    "year": 2021,
+    "duration_sec": 428,
+    "tags": ["instrumental", "slow build", "guitar", "long", "loud ending"]
+  },
+  {
+    "song_id": "pale-transit-thirty-miles-of-fence",
+    "name": "Thirty Miles of Fence",
+    "artist": "Pale Transit",
+    "genre": "post-rock",
+    "description": "Quieter and stranger. Bowed guitar and a drum part that never settles into a backbeat.",
+    "mood": "uneasy",
+    "year": 2024,
+    "duration_sec": 393,
+    "tags": ["instrumental", "quiet", "guitar", "long", "experimental"]
+  },
+  {
+    "song_id": "junie-fowler-two-cigarettes",
+    "name": "Two Cigarettes",
+    "artist": "Junie Fowler",
+    "genre": "country",
+    "description": "Pedal steel, brushed snare, and a lyric that does not resolve. Three verses, no bridge.",
+    "mood": "bittersweet",
+    "year": 2025,
+    "duration_sec": 208,
+    "tags": ["pedal steel", "storytelling", "slow", "vocal", "quiet"]
+  },
+  {
+    "song_id": "junie-fowler-county-line",
+    "name": "County Line",
+    "artist": "Junie Fowler",
+    "genre": "country",
+    "description": "Up-tempo and cheerful about something fairly bleak. Fiddle takes the solo.",
+    "mood": "wry",
+    "year": 2025,
+    "duration_sec": 187,
+    "tags": ["fiddle", "up-tempo", "singalong", "vocal", "bright"]
+  }
+]

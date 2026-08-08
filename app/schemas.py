@@ -1,15 +1,26 @@
-"""Schemas for the camping-store assistant.
+"""Schemas for the label assistant.
 
-Three groups live here:
+Four groups live here:
 
 1. `MemoryRouter` — the struct the model fills in to say which record it wants written.
    Bound as a tool but never executed as one; the graph routes on it.
-2. The memory records themselves (`UserProfile`, `TripPlan`, `GearNeed`). trustcall patches
-   these incrementally, so every field is optional or defaulted — a half-known profile must
-   still validate. The `description` on each field is what the extraction model reads, so
-   they are prompt text, not just documentation.
-3. `Product` — a catalog row, deliberately distinct from `CandidateProduct` (the record of a
-   product being considered).
+2. The memory records themselves (`UserProfile`, `ArtistProfile`, `SongCollection`).
+   trustcall patches these incrementally, so every field is optional or defaulted — a
+   half-known profile must still validate. The `description` on each field is what the
+   extraction model reads, so they are prompt text, not just documentation.
+3. The backend CRUD payloads — one schema per write operation the GraphQL backend exposes.
+   These are the shape the label's API actually accepts, kept separate from the memory
+   records so that what we remember about an artist and what we are entitled to send are
+   never the same object. `ArtistProfile.to_create_input()` is the only bridge between them.
+4. `Song` — a catalog row, deliberately distinct from `FoundSong` (the record of a song
+   surfaced to a user, with a note of why).
+
+Note on passwords: there is deliberately no password field on `UserProfile`. Records here
+are filled by an extraction model reading the transcript and are served verbatim by
+GET /users/{id}/memory, so a password field is a standing instruction to copy a secret out
+of the conversation into a readable store. Account credentials belong to the backend's
+Cognito pool, and the only credential this app handles is the short-lived ID token, which
+travels on the run config and is never stored — see app/identity.py.
 """
 
 from typing import Literal
@@ -21,29 +32,29 @@ from pydantic import BaseModel, Field
 # -------------------------------------------------------------
 # What the model may ask to have written. `forecast` is absent on purpose: it is written by
 # the weather tool in code, so the router must never be able to route to it.
-MemoryRecord = Literal["profile", "trip", "gear_needs"]
+MemoryRecord = Literal["profile", "artist", "found_music"]
 
 # Every record the store holds, router-writable or not.
-StoreRecord = Literal["profile", "trip", "gear_needs", "forecast"]
+StoreRecord = Literal["profile", "artist", "found_music", "forecast"]
 
 
 class MemoryRouter(BaseModel):
-    """Save durable information the customer has just given you.
+    """Save durable information the user has just given you.
 
     Call this whenever the conversation reveals something worth remembering after the
-    chat ends: who they are and what they do outdoors, the trip they are planning, or
-    which products are in play for a piece of gear.
+    chat ends: who they are and what they listen to, their own artist identity if they
+    are signing to the label, or which songs are in play for them.
     """
 
     update_type: MemoryRecord = Field(
         description=(
             "Which record to write. "
-            "'profile' = who the customer is, the activities they do, gear they own, budget "
-            "and brand preferences. "
-            "'trip' = the trip they are kitting out: destination, dates, nights, party size, "
-            "conditions. "
-            "'gear_needs' = an item they are shopping for and the products under "
-            "consideration for it, including ones being ruled out."
+            "'profile' = who the user is: whether they are here as a fan browsing or as "
+            "an artist seeking the label's patronage, and what they listen to. "
+            "'artist' = the user's own artist identity in their own words: name, genre, "
+            "bio, albums, songs, tour dates. "
+            "'found_music' = songs surfaced for the user, each with a note of why it was "
+            "put in front of them, and whether they liked or dismissed it."
         )
     )
     reason: str = Field(
@@ -54,168 +65,188 @@ class MemoryRouter(BaseModel):
 # -------------------------------------------------------------
 # Memory records
 # -------------------------------------------------------------
-class OutdoorActivity(BaseModel):
-    """A single outdoor pursuit the customer takes part in."""
-
-    activity: str = Field(
-        description="The activity, lowercase. e.g. 'backpacking', 'car camping', "
-        "'winter hiking', 'bouldering', 'wild swimming'."
-    )
-    experience_level: Literal["beginner", "intermediate", "advanced"] | None = Field(
-        default=None, description="How experienced they are at this specific activity."
-    )
-    frequency: str | None = Field(
-        default=None,
-        description="How often they do it, in their own words. e.g. 'most weekends', "
-        "'a few times a year'.",
-    )
-    notes: str | None = Field(
-        default=None,
-        description="Anything else specific to this activity: terrain they favour, trips "
-        "they mention, gear gripes.",
-    )
-
-
 class UserProfile(BaseModel):
-    """Durable facts about the customer, carried across every conversation."""
+    """Durable facts about the user, carried across every conversation."""
 
-    name: str | None = Field(default=None, description="The customer's name.")
-    home_base: str | None = Field(
-        default=None, description="Where they live or usually set out from."
-    )
-    activities: list[OutdoorActivity] = Field(
-        default_factory=list,
-        description="Every outdoor activity they have mentioned taking part in.",
-    )
-    owned_gear: list[str] = Field(
-        default_factory=list,
-        description="Gear they already own, so it is not recommended again. e.g. "
-        "'Osprey Atmos 65 pack', '3-season down bag'.",
-    )
-    budget_band: Literal["value", "mid", "premium"] | None = Field(
+    name: str | None = Field(default=None, description="The user's name.")
+    email: str | None = Field(
         default=None,
-        description="How they tend to spend on gear. Only set this if they have said "
-        "something about price or budget. Do not infer it from their experience level or "
-        "from a single product they liked — leave it null instead.",
+        description="The user's email address, only if they volunteer it.",
     )
-    preferred_brands: list[str] = Field(
-        default_factory=list, description="Brands they favour or have spoken well of."
+    account_type: Literal["guest", "fan", "artist"] | None = Field(
+        default="guest",
+        description=(
+            "How the user is here: 'guest' until they say, 'fan' if they are browsing and "
+            "listening, 'artist' if they are presenting their own music to the label."
+        ),
+    )
+    favourite_genres: list[str] = Field(
+        default_factory=list,
+        description="Genres the user has said they like, e.g. 'shoegaze', 'afrobeat'.",
+    )
+    favourite_artists: list[str] = Field(
+        default_factory=list,
+        description="Artists the user has named as ones they already listen to.",
+    )
+    dislikes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Genres, sounds or artists the user has ruled out, in their own terms, "
+            "e.g. 'nothing with heavy distortion'."
+        ),
     )
     constraints: list[str] = Field(
         default_factory=list,
-        description="Personal factors that affect what suits them. e.g. 'sleeps cold', "
-        "'bad knees, wants light loads', 'needs tall sizing', 'flies with hold luggage only'.",
+        description=(
+            "Anything else that should shape what is put in front of them, e.g. "
+            "'only wants tracks under 4 minutes', 'listens at work so nothing too loud'."
+        ),
     )
 
 
-class TripPlan(BaseModel):
-    """The trip the customer is currently shopping for."""
+class ArtistProfile(BaseModel):
+    """The user's own artist identity, as they describe it over the conversation.
 
-    destination: str | None = Field(
-        default=None, description="Where they are going. e.g. 'Big Bear', 'Cairngorms'."
-    )
-    start_date: str | None = Field(
-        default=None,
-        description="When the trip starts, as an ISO date (YYYY-MM-DD) if known, otherwise "
-        "the month or period they said, verbatim.",
-    )
-    nights: int | None = Field(default=None, description="How many nights they are out.")
-    party_size: int | None = Field(
-        default=None, description="How many people are going, including the customer."
-    )
-    season: Literal["summer", "3-season", "winter"] | None = Field(
-        default=None,
-        description="The conditions the gear must cope with. Use 'winter' for anything "
-        "involving snow, sustained sub-zero nights, or exposed mountain camping in winter.",
-    )
-    travel_mode: Literal["backpacking", "car camping", "basecamp"] | None = Field(
-        default=None,
-        description="How the gear will be carried. 'backpacking' means weight matters a lot; "
-        "'car camping' means it barely matters.",
-    )
-    expected_conditions: str | None = Field(
-        default=None,
-        description="Weather and terrain they expect, in their own words. e.g. 'rain, "
-        "near freezing at night, exposed ridges'.",
-    )
-    max_carry_weight_lb: float | None = Field(
-        default=None,
-        description="The heaviest loaded pack the customer is willing to carry on THIS "
-        "trip, in lb. A total for everything they carry, not the weight of any one item. "
-        "Only set it if they have stated a limit for this trip, e.g. 'I don't want to "
-        "carry more than 30 lb' — it belongs to the trip, so do not carry one over from "
-        "an earlier trip and do not infer one from their experience or fitness. If they "
-        "have not given a limit, leave it null; never write 0.",
-    )
-
-
-class CandidateProduct(BaseModel):
-    """One product being considered for a gear need, and where it stands."""
-
-    product_id: str = Field(
-        description="The catalog id, exactly as returned by search_products."
-    )
-    name: str = Field(description="The product name.")
-    price_usd: float | None = Field(default=None, description="Price in USD.")
-    status: Literal["candidate", "shortlisted", "eliminated"] = Field(
-        default="candidate",
-        description="'candidate' = found, not yet judged. 'shortlisted' = a serious "
-        "contender. 'eliminated' = ruled out; always give eliminated_reason.",
-    )
-    fit_reason: str | None = Field(
-        default=None,
-        description="Always fill this in when adding a candidate: why this product suits "
-        "this customer and this trip, citing its specs. e.g. '3.8 lb, under their 4.5 lb "
-        "limit, 3-season'. This is your assessment, not something the customer said.",
-    )
-    eliminated_reason: str | None = Field(
-        default=None,
-        description="Why it was ruled out, in the customer's terms. e.g. 'over budget at "
-        "$480', 'too heavy to carry for 3 days'.",
-    )
-    weight: float | None = Field(default=None, description="Weight of the product in lb.")
-
-
-class GearNeed(BaseModel):
-    """One item the customer needs for the trip, with the products in play for it.
-
-    This is the collection record: there is one of these per thing they are shopping for,
-    and it is narrowed over the conversation rather than rewritten.
+    The first four fields are deliberately the backend's CreateArtistInput, so publishing is
+    a projection rather than a translation — see `to_create_input`. Everything below them is
+    local colour the backend has no field for, and the last two are written in code once the
+    backend has accepted the profile, never by an extractor.
     """
 
-    need_id: str = Field(
-        description="Stable lowercase slug identifying the need, e.g. 'tent', "
-        "'sleeping_bag', 'stove'. Reuse the existing slug when updating a need."
+    name: str | None = Field(
+        default=None, description="The artist or band name, as they want it shown."
     )
-    category: str = Field(
-        description="Catalog category this need shops in, e.g. 'tent', 'sleeping_bag'."
+    genre: str | None = Field(
+        default=None, description="Their main genre, e.g. 'rock', 'pop', 'jazz'."
     )
-    requirements: str | None = Field(
+    bio: str | None = Field(
         default=None,
-        description="What the item has to satisfy, e.g. '2-person, under 4.5 lb, 3-season, "
-        "under $300'.",
+        description="A short description of the artist, in their own words where possible.",
     )
-    status: Literal["exploring", "narrowed", "decided"] = Field(
-        default="exploring",
-        description="'exploring' = still gathering options. 'narrowed' = down to a "
-        "shortlist. 'decided' = they have chosen; set selected_product_id.",
+    image_url: str | None = Field(
+        default=None, description="URL of a profile or poster image, if they have one."
     )
-    selected_product_id: str | None = Field(
-        default=None, description="The chosen product's catalog id, once decided."
+
+    albums: list[str] = Field(
+        default_factory=list, description="Albums the artist says they have released."
     )
-    candidates: list[CandidateProduct] = Field(
+    songs: list[str] = Field(
+        default_factory=list, description="Songs the artist has named as their own."
+    )
+    tour_dates: list[str] = Field(
         default_factory=list,
-        description="Every product considered for this need, including eliminated ones — "
-        "the history of the decision is the point, so never drop entries.",
+        description="Upcoming dates the artist has mentioned, as they said them.",
     )
-    weight: float | None = Field(default=None, description="Weight of the need in lb.")
+    influences: list[str] = Field(
+        default_factory=list,
+        description="Artists they name as influences or comparisons for their sound.",
+    )
+
+    # Backend sync. Set by the publish tool after the label's API accepts the profile, so
+    # their presence is what tells the graph this artist has already been published.
+    backend_artist_id: str | None = Field(
+        default=None,
+        description="The label backend's id for this artist. Never fill this in yourself.",
+    )
+    artist_slug: str | None = Field(
+        default=None,
+        description="The label backend's slug for this artist. Never fill this in yourself.",
+    )
+
+    def is_published(self) -> bool:
+        """Whether the label's backend has already accepted this profile."""
+        return self.backend_artist_id is not None
+
+    def to_create_input(self) -> "CreateArtistInput | None":
+        """Project onto the backend's createArtist payload, or None if it is not ready.
+
+        `name` is the one field the backend requires, so a profile without one is not a
+        submission — it is a conversation still in progress.
+        """
+        if not self.name:
+            return None
+        return CreateArtistInput(
+            name=self.name, genre=self.genre, bio=self.bio, image_url=self.image_url
+        )
+
+
+class FoundSong(BaseModel):
+    """One song put in front of the user, and what came of it."""
+
+    song_id: str | None = Field(
+        default=None,
+        description="The catalog id, exactly as returned by search_songs. Null if the song "
+        "came up in conversation rather than from a search.",
+    )
+    title: str = Field(description="The song title.")
+    artist: str | None = Field(default=None, description="Who performs it.")
+    why_found: str | None = Field(
+        default=None,
+        description=(
+            "Why this song was put in front of this user, drawn from what they have said "
+            "they like and from the song's own tags, e.g. 'shoegaze with the quiet vocals "
+            "they asked for'. This is your assessment to make, not something they have to "
+            "say first."
+        ),
+    )
+    status: Literal["suggested", "liked", "dismissed"] = Field(
+        default="suggested",
+        description="Where the song stands with the user.",
+    )
+    dismissed_reason: str | None = Field(
+        default=None,
+        description="If dismissed, why — in the user's own terms.",
+    )
+
+
+class SongCollection(BaseModel):
+    """Every song surfaced for this user, with what became of each.
+
+    Narrowed over the conversation rather than rewritten: a song the user rules out stays on
+    the list as dismissed, so it is neither offered again nor silently forgotten.
+    """
+
+    songs: list[FoundSong] = Field(
+        default_factory=list,
+        description="Every song put in front of the user, including dismissed ones.",
+    )
+
+
+# -------------------------------------------------------------
+# Backend CRUD payloads — one per write operation
+# -------------------------------------------------------------
+# These mirror the GraphQL backend's own input types. They exist as schemas rather than loose
+# arguments so that a payload is validated before it reaches the network, and so the
+# publish gate has something concrete to show the user before anything is sent.
+class CreateArtistInput(BaseModel):
+    """Payload for `artists.createArtist`. Built up over the conversation, sent once."""
+
+    name: str = Field(description="The artist or band name. The backend requires this.")
+    genre: str | None = None
+    bio: str | None = None
+    image_url: str | None = None
+
+
+class UploadSongInput(BaseModel):
+    """Payload for `songs.getUploadUrl` — step one of publishing a song."""
+
+    artist_id: str = Field(description="The label backend's id for the artist.")
+    filename: str = Field(description="The audio file's name, e.g. 'midnight-drive.mp3'.")
+
+
+class CreateSongInput(BaseModel):
+    """Payload for `songs.createSong` — step two, once the file is uploaded."""
+
+    artist_id: str = Field(description="The label backend's id for the artist.")
+    title: str = Field(description="The song title, as it should be displayed.")
+    s3_key: str = Field(description="The s3Key handed back by getUploadUrl.")
 
 
 # -------------------------------------------------------------
 # Forecast — written by the weather tool, never by an extractor
 # -------------------------------------------------------------
 class ForecastDay(BaseModel):
-    """One day of the forecast for a trip."""
+    """One day of the forecast, used to match music to the weather someone is listening in."""
 
     date: str
     temp_min_f: float | None = None
@@ -228,7 +259,7 @@ class ForecastDay(BaseModel):
 class MonthAverage(BaseModel):
     """What one calendar month was actually like, averaged from the Open-Meteo archive.
 
-    Used when a trip is beyond the forecast horizon. The archive carries measured
+    Used when a date is beyond the forecast horizon. The archive carries measured
     precipitation but no chance-of-rain — ERA5 does not model one — so there is
     deliberately no percentage here to mistake for a forecast probability.
     """
@@ -237,24 +268,17 @@ class MonthAverage(BaseModel):
     days_sampled: int
     avg_low_f: float | None = None
     avg_high_f: float | None = None
-    # What warmth decisions actually hinge on: the worst night that month, not the mean.
     coldest_low_f: float | None = None
     warmest_high_f: float | None = None
     total_precip_in: float | None = None
     max_wind_mph: float | None = None
 
 
-class TripForecast(BaseModel):
-    """Weather for a trip, as fetched from Open-Meteo.
+class SongForecast(BaseModel):
+    """Weather for a place and date range, as fetched from Open-Meteo.
 
-    Deliberately not a field on `TripPlan`. The trip extractor is handed the whole
-    `TripPlan` as `existing` on every trip update, so a field living there would be fair
-    game for the model to rewrite or drop on some unrelated turn. Kept in its own record,
-    written only by the weather tool, it cannot be touched by extraction at all.
-
-    `basis` distinguishes a real forecast from past weather standing in for one. It lives on
-    the record rather than only in prompt wording, so a stored value can never be read back
-    as a prediction it never was.
+    Kept so the assistant can pick music against the weather someone is actually in — a wet
+    grey week and a bright one call for different records.
     """
 
     location: str = Field(description="Resolved place name from geocoding.")
@@ -272,35 +296,18 @@ class TripForecast(BaseModel):
     source: str = "open-meteo"
 
 
-class GearItem(BaseModel):
-    """One line in a pack list, for weighing up what a camper will carry.
-
-    Typed rather than a loose dict so the model is given a schema for it: an untyped
-    argument leaves it guessing the shape, and it guesses wrong.
-    """
-
-    name: str = Field(description="What the item is, e.g. 'tent', 'stove', 'day of food'.")
-    weight_lb: float = Field(description="Weight of a single one of these, in lb.")
-    quantity: int = Field(default=1, description="How many of this item are being carried.")
-
-
 # -------------------------------------------------------------
-# Catalog
+# Song catalog
 # -------------------------------------------------------------
-class Product(BaseModel):
-    """A row in the store catalog."""
+class Song(BaseModel):
+    """A row in the local song catalog."""
 
-    product_id: str
+    song_id: str
     name: str
-    brand: str
-    category: str
-    price_usd: float
+    artist: str
+    genre: str
     description: str
-    activities: list[str] = Field(default_factory=list)
-    in_stock: bool = True
-    # Category-specific specs stay explicit rather than a loose dict, so search can filter
-    # on them. Each is only meaningful for some categories.
-    weight_lb: float | None = None
-    season: Literal["summer", "3-season", "winter"] | None = None
-    capacity: int | None = None
-    temp_rating_c: float | None = None
+    mood: str | None = None
+    year: int | None = None
+    duration_sec: int | None = None
+    tags: list[str] = Field(default_factory=list)

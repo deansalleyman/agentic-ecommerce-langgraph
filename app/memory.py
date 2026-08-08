@@ -2,14 +2,20 @@
 
 Memory is keyed by user rather than thread, so it outlives any one conversation:
 
-    ("profile",    user_id) / "main"    -> UserProfile
-    ("trip",       user_id) / "current" -> TripPlan
-    ("gear_needs", user_id) / need_id   -> GearNeed   (the collection)
+    ("profile",     user_id) / "main"    -> UserProfile
+    ("artist",      user_id) / "main"    -> ArtistProfile
+    ("found_music", user_id) / "current" -> SongCollection
+    ("forecast",    user_id) / "current" -> SongForecast
 
 Records are *patched*, not rewritten. trustcall asks the model for a JSON patch against the
 existing document and validates it against the schema, so narrowing a shortlist — flipping
-one candidate to eliminated with a reason — leaves every other candidate untouched. Asking
-the model to re-emit the whole document instead loses detail and burns tokens.
+one song to dismissed with a reason — leaves every other song untouched. Asking the model to
+re-emit the whole document instead loses detail and burns tokens.
+
+Two fields are deliberately out of the extractors' reach. `SongForecast` is written by the
+weather tool, and `ArtistProfile.backend_artist_id` / `artist_slug` are written by the
+publish gate once the label's backend has accepted the profile. Both arrive already
+structured from an API, so passing them through a model could only lose or garble them.
 """
 
 import datetime
@@ -21,29 +27,28 @@ from langchain_core.tracers.schemas import Run
 from langgraph.store.base import BaseStore
 from trustcall import create_extractor
 
-from app.catalog import product_by_id
 from app.llm import model
 from app.schemas import (
-    CandidateProduct,
-    GearNeed,
+    ArtistProfile,
+    SongCollection,
+    SongForecast,
     StoreRecord,
-    TripForecast,
-    TripPlan,
     UserProfile,
 )
 
 PROFILE_KEY = "main"
-TRIP_KEY = "current"
+ARTIST_KEY = "main"
+MUSIC_KEY = "current"
 FORECAST_KEY = "current"
 
 
 def _safe_label(user_id: str) -> str:
     """Encode a user id so it is legal as a store namespace label.
 
-    Store namespaces reject periods and empty labels, but the most natural customer id is
+    Store namespaces reject periods and empty labels, but the most natural user id is
     an email address. Escaping rather than stripping keeps the mapping one-to-one: '%' is
     escaped first, so 'a.b@x.com' and a literal 'a%2Eb@x%2Ecom' can never collide on the
-    same namespace. The customer's real id is what the API reports back; this encoding is
+    same namespace. The user's real id is what the API reports back; this encoding is
     only ever seen inside the store.
     """
     encoded = user_id.strip().replace("%", "%25").replace(".", "%2E")
@@ -57,42 +62,47 @@ def _namespace(record: StoreRecord, user_id: str) -> tuple[str, str]:
 # -------------------------------------------------------------
 # Extractors
 # -------------------------------------------------------------
-# Built once, only when a model is configured. enable_inserts is on for gear needs alone:
-# a customer accumulates needs over a conversation, but has exactly one profile and trip.
+# Built once, only when a model is configured. Each user has exactly one profile, one artist
+# identity and one collection of songs found for them, so none of these insert — a new song
+# is a patch appending to SongCollection.songs, which keeps the dismissed ones alongside it.
 if model is not None:
     profile_extractor = create_extractor(
         model, tools=[UserProfile], tool_choice="UserProfile"
     )
-    trip_extractor = create_extractor(model, tools=[TripPlan], tool_choice="TripPlan")
-    gear_extractor = create_extractor(
-        model, tools=[GearNeed], tool_choice="GearNeed", enable_inserts=True
+    artist_extractor = create_extractor(
+        model, tools=[ArtistProfile], tool_choice="ArtistProfile"
+    )
+    music_extractor = create_extractor(
+        model, tools=[SongCollection], tool_choice="SongCollection"
     )
 else:  # pragma: no cover - import-time convenience for unconfigured machines
-    profile_extractor = trip_extractor = gear_extractor = None
+    profile_extractor = artist_extractor = music_extractor = None
 
-TRUSTCALL_INSTRUCTION = """You maintain the store's records about this customer.
+TRUSTCALL_INSTRUCTION = """You maintain the label's records about this user.
 
 Update the record from the conversation below. Preserve everything the conversation does \
 not contradict — you are amending a record, not rewriting it.
 
-Facts about the customer, their trip, and their decisions record only what they actually \
+Facts about the user, their own music, and their reactions record only what they actually \
 said. A field with no evidence behind it stays null: an empty field is correct, a \
-plausible guess is a false record the store will act on later. Do not infer budget from \
-experience, or a preference from one product they happened to like.
+plausible guess is a false record the label will act on later. Do not infer a genre from \
+one song they liked, or a dislike from one they skipped without saying why.
 
-Null means null. Do not write 0, an empty string, or placeholder text in place of \
-something you were not told — a weight limit of 0 reads as "carry nothing" and will throw \
-out every product in the catalog.
+Null means null. Do not write an empty string or placeholder text in place of something \
+you were not told.
 
-Your own assessment is the exception, and is required rather than optional. Every \
-candidate product needs a fit_reason drawn from its catalog specs — why this item suits \
-this customer and this trip, e.g. "4.2 lb, inside their 4.5 lb limit, 2-person, 3-season". \
-That is your judgement to make, not something the customer has to say first.
+Your own assessment is the exception, and is required rather than optional. Every song \
+you record needs a why_found drawn from what the user has said and from the song's own \
+tags, e.g. "shoegaze with the quiet vocals they asked for". That is your judgement to \
+make, not something the user has to say first.
 
-For gear needs specifically: keep every candidate product that is already recorded, \
-including eliminated ones. When the customer rules something out, set that candidate's \
-status to "eliminated" and write eliminated_reason in their terms. When they choose, set \
-the need's status to "decided" and selected_product_id."""
+For the song collection specifically: keep every song that is already recorded, including \
+dismissed ones. When the user rules a song out, set its status to "dismissed" and write \
+dismissed_reason in their terms. When they like one, set its status to "liked".
+
+For the artist record: never fill in backend_artist_id or artist_slug. Those come back \
+from the label's own systems when a profile is published, and a value you invent would be \
+taken for a real one."""
 
 
 # -------------------------------------------------------------
@@ -138,7 +148,7 @@ def _find_tool_calls(payload: Any) -> Iterator[dict[str, Any]]:
     """Yield every tool call nested anywhere in a run's output payload.
 
     Deliberately structural rather than indexing a known path: this reads another library's
-    internal run shape, and a reporting detail must never be what breaks a customer's turn.
+    internal run shape, and a reporting detail must never be what breaks a user's turn.
     """
     if isinstance(payload, dict):
         for key, value in payload.items():
@@ -184,7 +194,7 @@ def summarize_spy(spy: Spy, schema_name: str) -> list[str]:
         elif name == schema_name:
             # An insert: the whole record is new, so report what it was actually filled with
             # rather than just naming the schema.
-            label = args.get("need_id") or args.get("name")
+            label = args.get("name")
             fields = [
                 f"{key} = {_format_value(value)}"
                 for key, value in args.items()
@@ -216,7 +226,7 @@ def diff_records(before: dict[str, Any] | None, after: dict[str, Any]) -> list[s
     """Field-level diff of a stored record, used when the spy comes back empty.
 
     The spy produces better prose, but it depends on another library's run internals. This
-    depends on nothing, so the customer always gets specifics.
+    depends on nothing, so the user always gets specifics.
     """
     old, new = _flatten(before or {}), _flatten(after)
     changes: list[str] = []
@@ -241,22 +251,25 @@ def get_profile(store: BaseStore, user_id: str) -> UserProfile | None:
     return UserProfile.model_validate(item.value) if item else None
 
 
-def get_trip(store: BaseStore, user_id: str) -> TripPlan | None:
-    item = store.get(_namespace("trip", user_id), TRIP_KEY)
-    return TripPlan.model_validate(item.value) if item else None
+def get_artist(store: BaseStore, user_id: str) -> ArtistProfile | None:
+    item = store.get(_namespace("artist", user_id), ARTIST_KEY)
+    return ArtistProfile.model_validate(item.value) if item else None
 
 
-def get_gear_needs(store: BaseStore, user_id: str) -> list[tuple[str, GearNeed]]:
-    items = store.search(_namespace("gear_needs", user_id), limit=100)
-    return [(item.key, GearNeed.model_validate(item.value)) for item in items]
+def get_found_music(store: BaseStore, user_id: str) -> SongCollection | None:
+    item = store.get(_namespace("found_music", user_id), MUSIC_KEY)
+    return SongCollection.model_validate(item.value) if item else None
 
 
-def get_forecast(store: BaseStore, user_id: str) -> TripForecast | None:
+def get_forecast(store: BaseStore, user_id: str) -> SongForecast | None:
     item = store.get(_namespace("forecast", user_id), FORECAST_KEY)
-    return TripForecast.model_validate(item.value) if item else None
+    return SongForecast.model_validate(item.value) if item else None
 
 
-def set_forecast(store: BaseStore, user_id: str, forecast: TripForecast) -> None:
+# -------------------------------------------------------------
+# Writes made in code, never by an extractor
+# -------------------------------------------------------------
+def set_forecast(store: BaseStore, user_id: str, forecast: SongForecast) -> None:
     """Record a forecast. Called by the weather tool, never by an extractor.
 
     The value arrives already structured from the API, so there is nothing for a model to
@@ -265,158 +278,83 @@ def set_forecast(store: BaseStore, user_id: str, forecast: TripForecast) -> None
     store.put(_namespace("forecast", user_id), FORECAST_KEY, forecast.model_dump())
 
 
-def committed_totals(needs: list[tuple[str, GearNeed]]) -> dict[str, Any]:
-    """What the customer has actually chosen: total weight, total cost, and the breakdown.
+def mark_artist_published(
+    store: BaseStore, user_id: str, backend_artist_id: str, artist_slug: str | None
+) -> None:
+    """Record the ids the label's backend gave this artist, after createArtist succeeded.
 
-    Arithmetic the code owns rather than the model. A running total is a pure function of
-    what is already recorded, so asking a model for it buys nothing and risks a dropped
-    line or a mis-transcribed spec — and with one tool call per turn, the call is usually
-    spent on recording anyway. These figures go straight into the prompt, always current.
+    Written here rather than left to an extractor for the same reason as the forecast: these
+    come back from the API already correct, and they are also what stops the publish gate
+    offering to publish the same profile twice.
     """
-    items: list[dict[str, Any]] = []
-    for _, need in needs:
-        if not need.selected_product_id:
-            continue
-        product = product_by_id(need.selected_product_id)
-        if product is None:
-            continue
-        items.append({
-            "need_id": need.need_id,
-            "product_id": product.product_id,
-            "name": product.name,
-            "weight_lb": product.weight_lb,
-            "price_usd": product.price_usd,
-        })
-
-    return {
-        "weight_lb": round(sum(i["weight_lb"] or 0 for i in items), 2),
-        "cost_usd": round(sum(i["price_usd"] or 0 for i in items), 2),
-        "items": items,
-        # Weight is only trustworthy if every chosen product has one on file.
-        "unweighed": [i["name"] for i in items if i["weight_lb"] is None],
-    }
+    artist = get_artist(store, user_id) or ArtistProfile()
+    artist.backend_artist_id = backend_artist_id
+    artist.artist_slug = artist_slug
+    store.put(_namespace("artist", user_id), ARTIST_KEY, artist.model_dump())
 
 
-def carry_limit(trip: TripPlan | None) -> float | None:
-    """The weight ceiling for this trip, or None if the customer has not set one.
+def set_artist_fields(store: BaseStore, user_id: str, **fields: Any) -> ArtistProfile:
+    """Amend the artist record in code. Used by the publish gate when the user corrects it.
 
-    There is no house default. A ceiling nobody agreed to is not a constraint worth
-    enforcing, and stating one in the prompt would assert an allowance the customer never
-    gave. The falsy check also keeps a stray 0 out — that means "not given", never
-    "carry nothing".
+    Only the fields the backend accepts are writable this way; the ids are not, so a user
+    amending their own profile cannot claim an artist id that is not theirs.
     """
-    if trip is not None and trip.max_carry_weight_lb:
-        return trip.max_carry_weight_lb
-    return None
+    artist = get_artist(store, user_id) or ArtistProfile()
+    for key, value in fields.items():
+        if key in ("name", "genre", "bio", "image_url") and value is not None:
+            setattr(artist, key, value)
+    store.put(_namespace("artist", user_id), ARTIST_KEY, artist.model_dump())
+    return artist
 
 
-def drop_selection(store: BaseStore, user_id: str, need_id: str, reason: str) -> bool:
-    """Un-choose a product, recording why. Returns False if the need is not found."""
-    namespace = _namespace("gear_needs", user_id)
-    item = store.get(namespace, need_id)
-    if item is None:
-        return False
+def awaiting_publication(artist: ArtistProfile | None) -> bool:
+    """Whether there is a complete artist profile that the backend has not seen yet.
 
-    need = GearNeed.model_validate(item.value)
-    dropped = need.selected_product_id
-    need.selected_product_id = None
-    need.status = "exploring"
-    for candidate in need.candidates:
-        if candidate.product_id == dropped:
-            candidate.status = "eliminated"
-            candidate.eliminated_reason = reason
-    store.put(namespace, need_id, need.model_dump())
-    return True
-
-
-def swap_selection(store: BaseStore, user_id: str, need_id: str, product_id: str) -> bool:
-    """Choose a different product for a need. Returns False if need or product is unknown."""
-    namespace = _namespace("gear_needs", user_id)
-    item = store.get(namespace, need_id)
-    product = product_by_id(product_id)
-    if item is None or product is None:
-        return False
-
-    need = GearNeed.model_validate(item.value)
-    need.selected_product_id = product_id
-    need.status = "decided"
-    known = {c.product_id for c in need.candidates}
-    if product_id not in known:
-        need.candidates.append(
-            CandidateProduct(
-                product_id=product.product_id,
-                name=product.name,
-                price_usd=product.price_usd,
-                status="shortlisted",
-                fit_reason="Chosen to bring the pack under its weight limit.",
-            )
-        )
-    for candidate in need.candidates:
-        if candidate.product_id == product_id:
-            candidate.status = "shortlisted"
-            candidate.eliminated_reason = None
-    store.put(namespace, need_id, need.model_dump())
-    return True
-
-
-def lighter_alternatives(needs: list[tuple[str, GearNeed]]) -> dict[str, list[dict[str, Any]]]:
-    """Per need, the already-discussed candidates lighter than the chosen product.
-
-    Offered with the interrupt so the customer can trade down without another search.
+    The gate's whole trigger condition, in one place: something worth sending, and no
+    evidence it has already been sent.
     """
-    options: dict[str, list[dict[str, Any]]] = {}
-    for _, need in needs:
-        chosen = product_by_id(need.selected_product_id or "")
-        if chosen is None or chosen.weight_lb is None:
-            continue
-        lighter = []
-        for candidate in need.candidates:
-            alt = product_by_id(candidate.product_id)
-            if alt is None or alt.weight_lb is None or alt.product_id == chosen.product_id:
-                continue
-            if alt.weight_lb < chosen.weight_lb:
-                lighter.append({
-                    "product_id": alt.product_id,
-                    "name": alt.name,
-                    "weight_lb": alt.weight_lb,
-                    "price_usd": alt.price_usd,
-                    "saves_lb": round(chosen.weight_lb - alt.weight_lb, 2),
-                })
-        if lighter:
-            options[need.need_id] = sorted(lighter, key=lambda o: -o["saves_lb"])
-    return options
+    return (
+        artist is not None
+        and not artist.is_published()
+        and artist.to_create_input() is not None
+    )
 
 
-def set_carry_limit(store: BaseStore, user_id: str, limit_lb: float) -> None:
-    """Raise or lower the trip's pack-weight limit."""
-    trip = get_trip(store, user_id) or TripPlan()
-    trip.max_carry_weight_lb = limit_lb
-    store.put(_namespace("trip", user_id), TRIP_KEY, trip.model_dump())
+# -------------------------------------------------------------
+# Reporting
+# -------------------------------------------------------------
+def liked_songs(collection: SongCollection | None) -> list[dict[str, Any]]:
+    """The songs the user has actually said yes to, for the prompt and the API."""
+    if collection is None:
+        return []
+    return [song.model_dump() for song in collection.songs if song.status == "liked"]
 
 
 def read_all(store: BaseStore, user_id: str) -> dict[str, Any]:
     """Everything remembered about a user, for the memory endpoint."""
     profile = get_profile(store, user_id)
-    trip = get_trip(store, user_id)
+    artist = get_artist(store, user_id)
+    collection = get_found_music(store, user_id)
     forecast = get_forecast(store, user_id)
     return {
         "user_id": user_id,
         "profile": profile.model_dump() if profile else None,
-        "trip": trip.model_dump() if trip else None,
+        "artist": artist.model_dump() if artist else None,
+        "found_music": collection.model_dump() if collection else None,
         "forecast": forecast.model_dump() if forecast else None,
-        "gear_needs": {key: need.model_dump() for key, need in get_gear_needs(store, user_id)},
     }
 
 
 def clear_all(store: BaseStore, user_id: str) -> None:
-    if store.get(_namespace("profile", user_id), PROFILE_KEY):
-        store.delete(_namespace("profile", user_id), PROFILE_KEY)
-    if store.get(_namespace("trip", user_id), TRIP_KEY):
-        store.delete(_namespace("trip", user_id), TRIP_KEY)
-    if store.get(_namespace("forecast", user_id), FORECAST_KEY):
-        store.delete(_namespace("forecast", user_id), FORECAST_KEY)
-    for key, _ in get_gear_needs(store, user_id):
-        store.delete(_namespace("gear_needs", user_id), key)
+    for record, key in (
+        ("profile", PROFILE_KEY),
+        ("artist", ARTIST_KEY),
+        ("found_music", MUSIC_KEY),
+        ("forecast", FORECAST_KEY),
+    ):
+        namespace = _namespace(record, user_id)  # type: ignore[arg-type]
+        if store.get(namespace, key):
+            store.delete(namespace, key)
 
 
 # -------------------------------------------------------------
@@ -431,89 +369,77 @@ def _extractor_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
     return [SystemMessage(content=TRUSTCALL_INSTRUCTION), *messages]
 
 
+def _patch_record(
+    extractor: Any,
+    schema_name: str,
+    before: dict[str, Any] | None,
+    messages: list[AnyMessage],
+) -> tuple[list[str], dict[str, Any]]:
+    """Run one extractor over the conversation and report what it changed.
+
+    All three records are single documents patched in place, so the mechanics are identical
+    and live here rather than being repeated three times.
+    """
+    if extractor is None:
+        raise RuntimeError("XAI_API_KEY is not set; cannot update memory.")
+
+    spy = Spy()
+    result = extractor.with_listeners(on_end=spy).invoke(
+        {
+            "messages": _extractor_messages(messages),
+            "existing": {schema_name: before} if before else None,
+        }
+    )
+
+    saved = result["responses"][0].model_dump()
+    return summarize_spy(spy, schema_name) or diff_records(before, saved), saved
+
+
 def update_profile(
     store: BaseStore, user_id: str, messages: list[AnyMessage]
 ) -> tuple[list[str], dict[str, Any]]:
-    """Patch the customer profile. Returns (change lines, the saved record)."""
-    if profile_extractor is None:
-        raise RuntimeError("XAI_API_KEY is not set; cannot update memory.")
-
+    """Patch the user profile. Returns (change lines, the saved record)."""
     current = get_profile(store, user_id)
     before = current.model_dump() if current else None
 
-    spy = Spy()
-    result = profile_extractor.with_listeners(on_end=spy).invoke(
-        {
-            "messages": _extractor_messages(messages),
-            "existing": {"UserProfile": before} if before else None,
-        }
-    )
-
-    saved = result["responses"][0].model_dump()
+    changes, saved = _patch_record(profile_extractor, "UserProfile", before, messages)
     store.put(_namespace("profile", user_id), PROFILE_KEY, saved)
-    return summarize_spy(spy, "UserProfile") or diff_records(before, saved), saved
+    return changes, saved
 
 
-def update_trip(
+def update_artist(
     store: BaseStore, user_id: str, messages: list[AnyMessage]
 ) -> tuple[list[str], dict[str, Any]]:
-    """Patch the trip being planned. Returns (change lines, the saved record)."""
-    if trip_extractor is None:
-        raise RuntimeError("XAI_API_KEY is not set; cannot update memory.")
+    """Patch the user's own artist identity. Returns (change lines, the saved record).
 
-    current = get_trip(store, user_id)
+    The backend ids are carried over from the stored record rather than taken from the
+    extractor's output. The instruction tells the model not to touch them, but an id is the
+    one field where a hallucination would be acted on as though it were real, so it is
+    enforced here as well.
+    """
+    current = get_artist(store, user_id)
     before = current.model_dump() if current else None
 
-    spy = Spy()
-    result = trip_extractor.with_listeners(on_end=spy).invoke(
-        {
-            "messages": _extractor_messages(messages),
-            "existing": {"TripPlan": before} if before else None,
-        }
-    )
+    changes, saved = _patch_record(artist_extractor, "ArtistProfile", before, messages)
+    if current is not None:
+        saved["backend_artist_id"] = current.backend_artist_id
+        saved["artist_slug"] = current.artist_slug
+    else:
+        saved["backend_artist_id"] = saved["artist_slug"] = None
 
-    saved = result["responses"][0].model_dump()
-    store.put(_namespace("trip", user_id), TRIP_KEY, saved)
-    return summarize_spy(spy, "TripPlan") or diff_records(before, saved), saved
+    store.put(_namespace("artist", user_id), ARTIST_KEY, saved)
+    return changes, saved
 
 
-def update_gear_needs(
+def update_found_music(
     store: BaseStore, user_id: str, messages: list[AnyMessage]
 ) -> tuple[list[str], dict[str, Any]]:
-    """Patch the gear-need collection. Returns (change lines, the saved records by key).
+    """Patch the collection of songs surfaced for this user."""
+    current = get_found_music(store, user_id)
+    before = current.model_dump() if current else None
 
-    Existing needs go in as (doc_id, schema_name, value) tuples; trustcall echoes the
-    doc_id back in response_metadata as `json_doc_id`, or "New" for an insert. That
-    mapping is what lets one need be amended while the others are left alone.
-    """
-    if gear_extractor is None:
-        raise RuntimeError("XAI_API_KEY is not set; cannot update memory.")
-
-    namespace = _namespace("gear_needs", user_id)
-    before = {key: need.model_dump() for key, need in get_gear_needs(store, user_id)}
-
-    spy = Spy()
-    result = gear_extractor.with_listeners(on_end=spy).invoke(
-        {
-            "messages": _extractor_messages(messages),
-            "existing": [(key, "GearNeed", value) for key, value in before.items()] or None,
-        }
-    )
-
-    saved: dict[str, Any] = {}
-    for response, metadata in zip(result["responses"], result["response_metadata"]):
-        # trustcall types responses as bare BaseModel; re-validate to get the real shape.
-        need = GearNeed.model_validate(response.model_dump())
-        doc_id = metadata.get("json_doc_id")
-        key = need.need_id if doc_id in (None, "New") else doc_id
-        record = need.model_dump()
-        store.put(namespace, key, record)
-        saved[key] = record
-
-    changes = summarize_spy(spy, "GearNeed")
-    if not changes:
-        for key, record in saved.items():
-            changes.extend(f"{key}: {line}" for line in diff_records(before.get(key), record))
+    changes, saved = _patch_record(music_extractor, "SongCollection", before, messages)
+    store.put(_namespace("found_music", user_id), MUSIC_KEY, saved)
     return changes, saved
 
 
@@ -527,94 +453,86 @@ def _describe_profile(profile: UserProfile | None) -> str:
     parts: list[str] = []
     if profile.name:
         parts.append(f"Name: {profile.name}")
-    if profile.home_base:
-        parts.append(f"Based in: {profile.home_base}")
-    if profile.activities:
-        activities = "; ".join(
-            ", ".join(
-                filter(
-                    None,
-                    [
-                        activity.activity,
-                        activity.experience_level,
-                        activity.frequency,
-                        activity.notes,
-                    ],
-                )
-            )
-            for activity in profile.activities
-        )
-        parts.append(f"Activities: {activities}")
-    if profile.owned_gear:
-        parts.append(f"Already owns: {', '.join(profile.owned_gear)}")
-    if profile.budget_band:
-        parts.append(f"Budget: {profile.budget_band}")
-    if profile.preferred_brands:
-        parts.append(f"Likes brands: {', '.join(profile.preferred_brands)}")
+    if profile.email:
+        parts.append(f"Email: {profile.email}")
+    if profile.account_type:
+        parts.append(f"Here as: {profile.account_type}")
+    if profile.favourite_genres:
+        parts.append(f"Likes genres: {', '.join(profile.favourite_genres)}")
+    if profile.favourite_artists:
+        parts.append(f"Already listens to: {', '.join(profile.favourite_artists)}")
+    if profile.dislikes:
+        parts.append(f"Ruled out: {', '.join(profile.dislikes)}")
     if profile.constraints:
         parts.append(f"Constraints: {', '.join(profile.constraints)}")
     return "\n".join(f"- {part}" for part in parts) if parts else "Nothing recorded yet."
 
 
-def _describe_trip(trip: TripPlan | None, needs: list[tuple[str, GearNeed]]) -> str:
-    fields: dict[str, Any] = {}
-    if trip is not None:
-        fields = {
-            "Destination": trip.destination,
-            "Starts": trip.start_date,
-            "Nights": trip.nights,
-            "Party size": trip.party_size,
-            "Season": trip.season,
-            "Travel mode": trip.travel_mode,
-            "Conditions": trip.expected_conditions,
-            # A pack limit of 0 means "not given", never "carry nothing", so it is
-            # filtered out below along with blanks rather than shown as a constraint.
-            "Max pack weight": (
-                f"{trip.max_carry_weight_lb} lb total" if trip.max_carry_weight_lb else None
-            ),
-        }
+def _describe_artist(artist: ArtistProfile | None) -> str:
+    """The user's own artist identity, and plainly whether the label has it yet."""
+    if artist is None:
+        return "Nothing recorded yet. This user has not presented themselves as an artist."
 
-    # Totals are computed here, not asked of the model — see committed_totals.
-    totals = committed_totals(needs)
-    if totals["items"]:
-        breakdown = ", ".join(
-            f"{i['name']} {i['weight_lb']} lb" if i["weight_lb"] is not None
-            else f"{i['name']} (weight unknown)"
-            for i in totals["items"]
+    parts: list[str] = []
+    if artist.name:
+        parts.append(f"Artist name: {artist.name}")
+    if artist.genre:
+        parts.append(f"Genre: {artist.genre}")
+    if artist.bio:
+        parts.append(f"Bio: {artist.bio}")
+    if artist.image_url:
+        parts.append(f"Image: {artist.image_url}")
+    if artist.influences:
+        parts.append(f"Influences: {', '.join(artist.influences)}")
+    if artist.albums:
+        parts.append(f"Albums: {', '.join(artist.albums)}")
+    if artist.songs:
+        parts.append(f"Songs: {', '.join(artist.songs)}")
+    if artist.tour_dates:
+        parts.append(f"Tour dates: {', '.join(artist.tour_dates)}")
+
+    if artist.is_published():
+        parts.append(
+            f"PUBLISHED to the label — backend id {artist.backend_artist_id}"
+            + (f", slug {artist.artist_slug}" if artist.artist_slug else "")
         )
-        fields["Chosen so far"] = f"{breakdown} — ${totals['cost_usd']:.2f} total"
+    elif artist.to_create_input() is not None:
+        parts.append(
+            "NOT yet published. The profile has everything the label needs; the user will "
+            "be asked to confirm before it is sent."
+        )
+    else:
+        parts.append("NOT yet published, and still missing an artist name.")
 
-        limit = carry_limit(trip)
-        if limit is None:
-            # No allowance to measure against, so report the total and claim nothing more.
-            line = f"{totals['weight_lb']} lb chosen (no limit set)"
-        else:
-            remaining = round(limit - totals["weight_lb"], 2)
-            line = f"{totals['weight_lb']} lb of {limit} lb"
-            line += (
-                f" — {remaining} lb still spare" if remaining >= 0
-                else f" — {abs(remaining)} lb OVER"
-            )
-        if totals["unweighed"]:
-            line += f" (excludes {', '.join(totals['unweighed'])}, no weight on file)"
-        fields["Pack weight"] = line
-
-    parts = [
-        f"- {label}: {value}"
-        for label, value in fields.items()
-        if value is not None and value != ""
-    ]
-    return "\n".join(parts) if parts else "Nothing recorded yet."
+    return "\n".join(f"- {part}" for part in parts) if parts else "Nothing recorded yet."
 
 
-def _forecast_heading(forecast: TripForecast | None) -> str:
+def _describe_found_music(collection: SongCollection | None) -> str:
+    if collection is None or not collection.songs:
+        return "Nothing recorded yet."
+
+    lines: list[str] = []
+    for song in collection.songs:
+        line = f"- [{song.status}] {song.title}"
+        if song.artist:
+            line += f" — {song.artist}"
+        if song.song_id:
+            line += f" ({song.song_id})"
+        reason = song.dismissed_reason or song.why_found
+        if reason:
+            line += f" — {reason}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _forecast_heading(forecast: SongForecast | None) -> str:
     """The section heading, so a historical record is never filed under 'FORECAST'."""
     if forecast is not None and forecast.basis == "historical":
-        return "TYPICAL CONDITIONS FOR THE TRIP (PAST WEATHER, NOT A FORECAST):"
-    return "FORECAST FOR THE TRIP:"
+        return "TYPICAL CONDITIONS THERE (PAST WEATHER, NOT A FORECAST):"
+    return "WEATHER WHERE THEY ARE LISTENING:"
 
 
-def _describe_forecast(forecast: TripForecast | None) -> str:
+def _describe_forecast(forecast: SongForecast | None) -> str:
     """The weather record, with its headline figures worked out here rather than by the model.
 
     Past weather standing in for a forecast is labelled as such on every line it appears, so
@@ -643,7 +561,7 @@ def _describe_forecast(forecast: TripForecast | None) -> str:
         if average.coldest_low_f is not None:
             lines.append(
                 f"- Coldest night that month {average.coldest_low_f}F, warmest day "
-                f"{average.warmest_high_f}F — size warmth against the cold end, not the average"
+                f"{average.warmest_high_f}F"
             )
         if average.total_precip_in is not None:
             lines.append(f"- {average.total_precip_in} in of precipitation over the month")
@@ -657,7 +575,6 @@ def _describe_forecast(forecast: TripForecast | None) -> str:
     lows = [d.temp_min_f for d in forecast.days if d.temp_min_f is not None]
     highs = [d.temp_max_f for d in forecast.days if d.temp_max_f is not None]
     wet = [d for d in forecast.days if (d.precipitation_chance_pct or 0) >= 30]
-    winds = [d.wind_max_mph for d in forecast.days if d.wind_max_mph is not None]
 
     lines = [
         f"- {forecast.location}, {forecast.start_date} to {forecast.end_date} "
@@ -665,43 +582,12 @@ def _describe_forecast(forecast: TripForecast | None) -> str:
     ]
     if lows and highs:
         lines.append(f"- Coldest night {min(lows)}F, warmest day {max(highs)}F")
-    if winds:
-        lines.append(f"- Strongest wind {max(winds)} mph")
     if wet:
         days = ", ".join(f"{d.date} {d.precipitation_chance_pct}%" for d in wet)
         lines.append(f"- Rain likely: {days}")
     else:
         lines.append("- No day above a 30% chance of rain")
-
-    lines.append("- By day: " + "; ".join(
-        f"{d.date} {d.temp_min_f}-{d.temp_max_f}F, {d.precipitation_chance_pct}% rain"
-        for d in forecast.days
-    ))
     return "\n".join(lines)
-
-
-def _describe_gear_needs(needs: list[tuple[str, GearNeed]]) -> str:
-    if not needs:
-        return "Nothing recorded yet."
-
-    blocks: list[str] = []
-    for _, need in needs:
-        header = f"- {need.need_id} ({need.status})"
-        if need.requirements:
-            header += f" — needs: {need.requirements}"
-        if need.selected_product_id:
-            header += f" — chosen: {need.selected_product_id}"
-        lines = [header]
-        for candidate in need.candidates:
-            detail = f"    - [{candidate.status}] {candidate.name} ({candidate.product_id})"
-            if candidate.price_usd is not None:
-                detail += f" ${candidate.price_usd:.2f}"
-            reason = candidate.eliminated_reason or candidate.fit_reason
-            if reason:
-                detail += f" — {reason}"
-            lines.append(detail)
-        blocks.append("\n".join(lines))
-    return "\n".join(blocks)
 
 
 def render_memory_prompt(store: BaseStore, user_id: str, summary: str = "") -> str:
@@ -724,74 +610,91 @@ def render_memory_prompt(store: BaseStore, user_id: str, summary: str = "") -> s
         else ""
     )
 
-    return f"""You are a shopping assistant for an online camping and outdoor store. You \
-help customers choose gear for real trips: ask about the trip and how they camp, search \
-the catalog, and narrow the options down with them until they have decided.
+    # Without this the model dates "this week" from its training data, which quietly sends
+    # the weather tool to the historical archive for a week that has already happened.
+    today = datetime.date.today().isoformat()
+
+    return f"""You are the assistant for It's The Label, an independent record label. You \
+serve two kinds of visitor, and which one you are talking to changes what you do:
+
+- A **fan** is here to find music. Ask what they listen to, search the catalog, and narrow \
+it down with them until they have something they actually want to hear.
+- An **artist** is here to be signed. Draw out who they are and what they make, build up \
+their artist profile, and when it is complete offer to publish it to the label.
+
+Work out which without interrogating them — most people say so in their first message or \
+two. Someone can be both.
 
 How to work:
-- Recommend only products returned by search_products. Never invent products or prices.
-- Ask about what actually drives the choice — conditions, how far they carry it, whether \
-they sleep cold, what they already own — but no more than a couple of questions at a time.
-- When you rule a product out, say why in plain terms, and record it.
-- Prices are in USD, weights in lb.
-- Do not do arithmetic yourself. The running pack weight, the total cost and the weight \
-still spare are computed for you and shown under CURRENT TRIP below — quote those figures, \
-do not recompute or estimate them. For a what-if over items that are not chosen catalog \
-products ("what if I add 3 days of food?"), call calculate_gear_weight rather than adding \
-up in your head.
-- Once you know where and when they are going, call weather_forcast_tool. What it finds is \
-saved automatically and appears in the weather section below; quote it from there rather \
-than re-fetching or recalling it. Use it to justify warmth and waterproofing — a 30F night \
-is the argument for a warmer bag. If it contradicts what they expect, say so plainly rather \
-than going along with either.
-- A real forecast only reaches about two weeks ahead. Past that the tool returns what the \
-same month was actually like a year ago, marked NOT A FORECAST. Say which one you are \
-working from — "no forecast reaches that far out, but last December there ran around 33F at \
-night" — and never present past weather as what the weather will be. Plan warmth against \
-the coldest night on record for that month rather than the average, and remind them a \
-single past year is a guide, not a guarantee.
-- A max pack weight is a budget for the whole kit, not a limit on any single item. Only \
-that trip's limit applies — there is no house default, so if none is recorded there is no \
-limit, and never carry one over from an earlier trip. When it is getting tight, say so and \
-offer the lighter option rather than quietly dropping something they wanted.
-- If the trip is backpacking and no max pack weight is recorded, ask once — while they are \
-choosing gear, where the weight actually decides the purchase, not up front — whether there \
-is a total weight they want to stay under. If they say there is no limit, let it go and do \
-not ask again. Do not ask at all for car camping, where it does not matter.
-- If the query mentions a location, call the weather_forcast_tool to get the expected weather for the given date period.
+- Recommend only songs returned by search_songs. Never invent songs, artists or releases.
+- Ask about what actually drives the choice — what they already listen to, what they cannot \
+stand, what they want it for — but no more than a couple of questions at a time.
+- When you rule a song out, say why in plain terms, and record it.
+- The catalog is the label's own back catalogue and works offline. The list_label_artists, \
+get_label_artist and list_artist_songs tools read the live roster from the label's backend, \
+which is a different and larger set. Use the catalog for discovery; use the backend tools \
+when someone asks who is signed to the label right now. If a backend tool returns an error, \
+say plainly that the label's systems are not answering and carry on with the catalog rather \
+than pretending you found nothing.
+- Weather is evidence about what to play them. If they mention where they are, or where \
+they will be, call weather_forcast_tool — a wet grey week and a bright one call for \
+different records, and it is one of the few things you can learn about someone without \
+asking them another question. Feed it into the search: a cold wet week is an argument for \
+`mood` of calm, melancholy or moody; a bright warm one for joyful, warm or euphoric. Say why \
+you are doing it — "it's going to be grey there all week, so here is something to match" — \
+so it reads as a reason rather than a guess, and drop the idea at once if they say their \
+taste has nothing to do with the weather. What the tool finds is saved automatically and \
+appears below; quote it from there rather than re-fetching. Today is {today} — work every \
+date out from that, never from memory, and pass start_date as YYYY-MM-DD. "This week" means \
+{today}, not a week from some other year. A real forecast only reaches about two weeks out; \
+past that the tool returns what that month was actually like a year ago, marked NOT A \
+FORECAST. Never present past weather as a prediction.
+- Never ask for a password, and never repeat one back. Signing in happens outside this \
+conversation; if someone offers a password, tell them not to and carry on.
+
+Publishing an artist to the label:
+- Build the artist record up in conversation first. The label needs a name at minimum, and \
+a genre, bio and image make a better profile.
+- You do not publish it yourself and you must not claim to have. Once the record is \
+complete, the user is asked to confirm, and only then is it sent. You will be told what \
+happened afterwards — report that, not what you expected to happen.
+- Publishing a song is a separate two-step job once they are signed: get_song_upload_url \
+first, the file is uploaded to what it returns, then register_song with the s3_key it gave \
+you. You can only make one tool call at a time, so do these on separate turns and never \
+call register_song before the upload has actually happened.
 
 Keeping records (call the MemoryRouter tool):
-- 'profile' when they reveal something durable about themselves: activities, experience, \
-gear they own, budget, brands, or a constraint like sleeping cold.
-- 'trip' when they mention where they are going, when, for how long, with how many people, \
-or in what conditions and for weather forecasts.
-- 'gear_needs' when they name something they need, when you rule a product out, or when \
-they choose one also suggest from weather conditions to suggest suitable gear.
+- 'profile' when they reveal something durable about themselves as a listener: genres, \
+artists they already follow, something they have ruled out, or how they will be listening.
+- 'artist' when they tell you about their own music: their artist name, genre, bio, \
+influences, albums, songs or tour dates.
+- 'found_music' when you put songs in front of them, when they like one, or when they \
+rule one out.
 
 Record before you reply. You can only make one tool call at a time, so the order matters:
 
-1. Search results just came back from search_products? Your next action is a MemoryRouter \
-call with update_type 'gear_needs' — recording the need and every product the search \
-returned as candidates. Present them to the customer on the turn after that.
-2. The customer just ruled a product out, or chose one? Same: MemoryRouter with \
-'gear_needs' first, then reply.
-3. They mentioned something about themselves or the trip? MemoryRouter with 'profile' or \
-'trip' first, then reply.
+1. Search results just came back from search_songs? Your next action is a MemoryRouter \
+call with update_type 'found_music' — recording every song the search returned, each with \
+why you are offering it. Present them to the user on the turn after that.
+2. The user just liked a song, or ruled one out? Same: MemoryRouter with 'found_music' \
+first, then reply.
+3. They told you something about themselves? MemoryRouter with 'profile'. About their own \
+music? MemoryRouter with 'artist'. Then reply.
 
-Never present or discuss products you have not recorded. After a record is saved you are \
-told exactly what changed — mention it to the customer briefly, in your own words, as part \
-of your reply.
+Never present or discuss songs you have not recorded. After a record is saved you are told \
+exactly what changed — mention it to the user briefly, in your own words, as part of your \
+reply.
 
-=== What you already know about this customer ==={earlier}
+=== What you already know about this user ==={earlier}
 
-CUSTOMER PROFILE:
+USER PROFILE:
 {_describe_profile(get_profile(store, user_id))}
 
-CURRENT TRIP:
-{_describe_trip(get_trip(store, user_id), get_gear_needs(store, user_id))}
+THEIR OWN ARTIST PROFILE:
+{_describe_artist(get_artist(store, user_id))}
 
 {_forecast_heading(get_forecast(store, user_id))}
 {_describe_forecast(get_forecast(store, user_id))}
 
-GEAR NEEDS AND PRODUCTS IN PLAY:
-{_describe_gear_needs(get_gear_needs(store, user_id))}"""
+SONGS FOUND FOR THEM:
+{_describe_found_music(get_found_music(store, user_id))}"""

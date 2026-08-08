@@ -1,14 +1,17 @@
-"""The shopping-assistant graph.
+"""The label-assistant graph.
 
-    START -> agent ─ MemoryRouter(profile)    -> update_profile    ─┐
-                   ├ MemoryRouter(trip)       -> update_trip       ─┤
-                   ├ MemoryRouter(gear_needs) -> update_gear_needs ─┼-> agent
-                   ├ catalog / cargo tool     -> tools -> weight_review
-                   └ no tool call ------------------------------------> END
+    START -> agent ─ MemoryRouter(profile)     -> update_profile     ────────┐
+                   ├ MemoryRouter(artist)      -> update_artist -> publish   ┤
+                   ├ MemoryRouter(found_music) -> update_found_music ────────┼-> agent
+                   ├ catalog / weather / backend tool -> tools ──────────────┘
+                   └ no tool call -----------------------------------------> END
 
 The agent decides when something is worth remembering by calling the MemoryRouter tool;
 the conditional edge reads `update_type` off that call and sends the run to the matching
 trustcall node. MemoryRouter is bound as a tool but never executed as one.
+
+`publish` is the one node that writes to the label's own backend, and it interrupts for a
+yes before it does — see publish_review_node.
 """
 
 from app.env import load_env_file
@@ -43,11 +46,13 @@ from app.catalog import catalog_tools  # noqa: E402
 from app.identity import (  # noqa: E402,F401  (DEFAULT_USER_ID re-exported for callers)
     AssistantContext,
     DEFAULT_USER_ID,
+    id_token_from_config,
     user_id_from_config,
 )
 from app.formatting import normalize_content  # noqa: E402
+from app.graphql_backend_client import backend_tools, create_artist  # noqa: E402
 from app.llm import require_model  # noqa: E402
-from app.schemas import GearItem, MemoryRouter  # noqa: E402
+from app.schemas import MemoryRouter  # noqa: E402
 from app.weather_forcast import weather_forcast_tool  # noqa: E402
 
 # Compaction. The whole transcript is re-sent on every agent turn, so a long shopping
@@ -71,31 +76,11 @@ class AgentState(TypedDict):
 # -------------------------------------------------------------
 # 1. Tools
 # -------------------------------------------------------------
-@tool
-def calculate_gear_weight(items: list[GearItem]) -> float:
-    """Calculates the total weight of a pack list, in lb.
-
-    Use for working out what a camper can reasonably carry in their backpack. Pass one
-    entry per distinct item, each with its own weight in lb and how many are carried.
-
-    Args:
-        items: The pack list, e.g.
-            [{"name": "tent", "weight_lb": 3.79, "quantity": 1},
-             {"name": "day of food", "weight_lb": 1.8, "quantity": 3}]
-
-    Returns:
-        The total weight of everything on the list, in lb.
-    """
-    total = sum(item.weight_lb * item.quantity for item in items)
-    print(f"Calculating gear weight: {len(items)} lines, total={total} lb")
-    return total
-
-
 # Persistence — the checkpointer holds threads, the store holds per-user memory
 checkpointer = InMemorySaver()
 store = InMemoryStore()
 
-tools = [calculate_gear_weight, *catalog_tools, weather_forcast_tool]
+tools = [*catalog_tools, weather_forcast_tool, *backend_tools]
 tool_node = ToolNode(tools)
 
 # MemoryRouter is bound so the model can request a memory write, but it is not in
@@ -123,10 +108,10 @@ def _router_call(message: Any) -> dict[str, Any] | None:
 # 3. Nodes
 # -------------------------------------------------------------
 def call_grok_agent(state: AgentState, config: RunnableConfig, store: BaseStore):
-    """Passes the conversation, plus everything remembered about the customer, to Grok."""
+    """Passes the conversation, plus everything remembered about the user, to Grok."""
     model_with_tools = require_model().bind_tools(bindable_tools, parallel_tool_calls=False)
 
-    # Everything the model is told about this customer — stored records and the summary of
+    # Everything the model is told about this user — stored records and the summary of
     # any turns compaction has already dropped — is assembled in one place.
     summary = state.get("summary", "")
     system_prompt = SystemMessage(
@@ -193,12 +178,12 @@ def summarize_conversation_node(state: AgentState):
     if summary:
         instruction = (
             f"This is a summary of the conversation to date: {summary}\n\n"
-            "Extend it to take account of the newer messages above. Keep what the customer "
+            "Extend it to take account of the newer messages above. Keep what the user "
             "asked for, what was chosen or ruled out and why."
         )
     else:
         instruction = (
-            "Summarise the conversation above. Keep what the customer asked for, what was "
+            "Summarise the conversation above. Keep what the user asked for, what was "
             "chosen or ruled out and why."
         )
 
@@ -211,7 +196,14 @@ def summarize_conversation_node(state: AgentState):
 
 def should_continue(
     state: AgentState,
-) -> Literal["update_profile", "update_trip", "update_gear_needs", "tools", "summarize_conversation", "__end__"]:
+) -> Literal[
+    "update_profile",
+    "update_artist",
+    "update_found_music",
+    "tools",
+    "summarize_conversation",
+    "__end__",
+]:
     """Routes on what the agent asked for: a memory write, a tool, or nothing.
 
     Work in progress always wins. Compaction is checked only where the turn would
@@ -226,7 +218,7 @@ def should_continue(
     router = _router_call(last_message)
     if router is not None:
         update_type = (router.get("args") or {}).get("update_type")
-        if update_type in ("profile", "trip", "gear_needs"):
+        if update_type in ("profile", "artist", "found_music"):
             return f"update_{update_type}"  # type: ignore[return-value]
         # Unrecognised update_type: fall through to the tool node, which answers the call
         # with an error the agent can recover from rather than stranding it.
@@ -234,14 +226,14 @@ def should_continue(
     if getattr(last_message, "tool_calls", None):
         return "tools"
 
-    # Turn is over: the customer has their answer. Compact before the next one.
+    # Turn is over: the user has their answer. Compact before the next one.
     if len(messages) > SUMMARIZE_AFTER_MESSAGES:
         return "summarize_conversation"
     return "__end__"
 
 
 def _memory_node(
-    record: Literal["profile", "trip", "gear_needs"],
+    record: Literal["profile", "artist", "found_music"],
     update: Callable[[BaseStore, str, list[AnyMessage]], tuple[list[str], dict[str, Any]]],
 ):
     """Builds a node that patches one record and reports back what changed."""
@@ -281,120 +273,122 @@ def _memory_node(
 
 
 update_profile_node = _memory_node("profile", memory.update_profile)
-update_trip_node = _memory_node("trip", memory.update_trip)
-update_gear_needs_node = _memory_node("gear_needs", memory.update_gear_needs)
+update_artist_node = _memory_node("artist", memory.update_artist)
+update_found_music_node = _memory_node("found_music", memory.update_found_music)
 
 
-def weight_review_node(state: AgentState, config: RunnableConfig, store: BaseStore):
+def publish_review_node(state: AgentState, config: RunnableConfig, store: BaseStore):
     """
-    Check the customer's chosen kit against the weight limit for this trip, and pause if
-    it is over.
+    Show the user their artist profile and get a yes before it is sent to the label.
 
-    The total is computed from the store — the products they have actually chosen, weighed
-    from the catalog — not read off a model's arithmetic. The limit is the trip's own
-    max_carry_weight_lb when they have set one.
+    Creating an artist is a public write the backend offers no way to undo, so it is the
+    one thing in this graph that never happens on the model's say-so. The payload shown is
+    built from the stored record, not from anything the model composed for this turn.
+
+    Nothing to publish — no artist record, no name on it yet, or the label already has it —
+    means this node does nothing at all and the run carries straight on.
 
     Resume via POST /threads/{id}/runs with exactly one of:
-        {"command": {"resume": {"swap": {"need_id": "tent", "product_id": "..."}}}}
-        {"command": {"resume": {"drop": "tent"}}}
-        {"command": {"resume": {"max_carry_weight_lb": 35}}}
-        {"command": {"resume": {"warning_overridden": true}}}
+        {"command": {"resume": {"confirm": true}}}
+        {"command": {"resume": {"amend": {"genre": "shoegaze", "bio": "..."}}}}
+        {"command": {"resume": {"cancel": true}}}
     Anything else re-prompts, so the thread stays paused until it gets a usable answer.
     """
     user_id = _user_id(config)
-    applied: list[str] = []
     error: str | None = None
 
     while True:
-        # Re-read every pass: an edit below changes the total, and the loop re-checks it.
-        trip = memory.get_trip(store, user_id)
-        needs = memory.get_gear_needs(store, user_id)
-        totals = memory.committed_totals(needs)
-        limit = memory.carry_limit(trip)
+        # Re-read every pass: an amendment below changes the payload, and the loop
+        # re-shows it before asking again.
+        artist = memory.get_artist(store, user_id)
+        if not memory.awaiting_publication(artist):
+            return {}
 
-        # No limit, no review: the only ceiling is the one the customer set for this trip.
-        if limit is None:
-            break
-
-        over_by = round(totals["weight_lb"] - limit, 2)
-        if over_by <= 0:
-            break
+        payload = artist.to_create_input()  # not None: awaiting_publication checked it
+        assert payload is not None
 
         request: dict[str, Any] = {
             "question": (
-                f"The chosen kit is {totals['weight_lb']} lb, {over_by} lb over the "
-                f"{limit} lb limit for this trip. Swap something lighter, drop an item, "
-                "raise the limit, or carry on anyway."
+                f"Publish '{payload.name}' to the label? This creates a public artist "
+                "profile, and the label's backend has no way to delete one."
             ),
-            "committed_lb": totals["weight_lb"],
-            "limit_lb": limit,
-            "over_by_lb": over_by,
-            "items": totals["items"],
-            "lighter_options": memory.lighter_alternatives(needs),
+            "artist": payload.model_dump(),
+            # Not blockers — the backend only requires a name — but worth a last look
+            # before something public goes out half-filled.
+            "incomplete": [
+                field
+                for field in ("genre", "bio", "image_url")
+                if not getattr(payload, field)
+            ],
         }
         if error:
             request["error"] = error
 
         user_input: Any = interrupt(request)
 
-        # Resuming re-runs this node from the top, so any edit made here happens again on
-        # replay. Each of these is idempotent — setting the same selection or dropping an
-        # already-dropped need changes nothing the second time.
+        # Resuming re-runs this node from the top, so everything before the interrupt
+        # happens again on replay. Only reads and idempotent amendments live above it;
+        # the one irreversible act — the write itself — is below the loop, reached once.
         if not isinstance(user_input, dict):
-            error = "Send an object with one of: swap, drop, max_carry_weight_lb, warning_overridden."
+            error = "Send an object with one of: confirm, amend, cancel."
             continue
 
-        if user_input.get("warning_overridden"):
-            applied.append(
-                f"The customer chose to carry on at {totals['weight_lb']} lb, "
-                f"{over_by} lb over their {limit} lb limit."
-            )
-            break
+        if user_input.get("cancel"):
+            return {
+                "messages": [
+                    HumanMessage(
+                        content="I don't want to publish my artist profile yet. "
+                        "Leave it as a draft."
+                    )
+                ]
+            }
 
-        swap = user_input.get("swap")
-        if isinstance(swap, dict) and swap.get("need_id") and swap.get("product_id"):
-            if memory.swap_selection(store, user_id, swap["need_id"], swap["product_id"]):
-                applied.append(f"Swapped {swap['need_id']} to {swap['product_id']}.")
-                error = None
-                continue
-            error = f"No such need or product: {swap['need_id']} / {swap['product_id']}."
-            continue
-
-        dropped = user_input.get("drop")
-        if isinstance(dropped, str) and dropped:
-            if memory.drop_selection(
-                store, user_id, dropped, f"Pushed the pack over its {limit} lb limit."
-            ):
-                applied.append(f"Dropped the chosen {dropped}.")
-                error = None
-                continue
-            error = f"No such gear need: {dropped}."
-            continue
-
-        new_limit = user_input.get("max_carry_weight_lb")
-        if isinstance(new_limit, (int, float)) and not isinstance(new_limit, bool):
-            if new_limit <= 0:
-                error = "max_carry_weight_lb must be greater than zero."
-                continue
-            memory.set_carry_limit(store, user_id, float(new_limit))
-            applied.append(f"Raised the trip's pack limit to {new_limit} lb.")
+        amend = user_input.get("amend")
+        if isinstance(amend, dict) and amend:
+            memory.set_artist_fields(store, user_id, **amend)
             error = None
             continue
 
-        error = "Send an object with one of: swap, drop, max_carry_weight_lb, warning_overridden."
+        if user_input.get("confirm"):
+            break
 
-    if not applied:
+        error = "Send an object with one of: confirm, amend, cancel."
+
+    # Confirmed. Read once more so an amendment made on the final pass is included.
+    artist = memory.get_artist(store, user_id)
+    payload = artist.to_create_input() if artist else None
+    if payload is None:  # pragma: no cover - the loop cannot exit with this unset
         return {}
 
-    # Tell the agent what the customer decided, so it can explain the new position.
-    return {
-        "messages": [
-            HumanMessage(
-                content=" ".join(applied)
-                + " Tell me where that leaves my pack weight."
-            )
-        ]
-    }
+    result = create_artist(
+        name=payload.name,
+        genre=payload.genre,
+        bio=payload.bio,
+        image_url=payload.image_url,
+        id_token=id_token_from_config(config),
+    )
+
+    if "error" in result:
+        # The record keeps backend_artist_id unset, so the gate will offer again next
+        # time rather than leaving the user thinking they are on the roster.
+        outcome = (
+            f"Publishing my artist profile failed: {result['error']} "
+            "Tell me what happened and what I can do about it."
+        )
+    else:
+        memory.mark_artist_published(
+            store, user_id, result.get("id", ""), result.get("artistSlug")
+        )
+        outcome = (
+            f"My artist profile is now published to the label as "
+            f"'{result.get('name', payload.name)}'"
+            + (f" (slug {result['artistSlug']})" if result.get("artistSlug") else "")
+            + ". Tell me what that means and what happens next."
+        )
+
+    # Report back as a human turn, matching how the rest of this graph hands control back
+    # to the agent after something happened outside its control.
+    return {"messages": [HumanMessage(content=outcome)]}
 
 
 # -------------------------------------------------------------
@@ -403,23 +397,23 @@ def weight_review_node(state: AgentState, config: RunnableConfig, store: BaseSto
 workflow = StateGraph(AgentState, context_schema=AssistantContext)
 workflow.add_node("agent", call_grok_agent)
 workflow.add_node("tools", tool_node)
-workflow.add_node("weight_review", weight_review_node)
+workflow.add_node("publish_review", publish_review_node)
 workflow.add_node("update_profile", update_profile_node)
-workflow.add_node("update_trip", update_trip_node)
-workflow.add_node("update_gear_needs", update_gear_needs_node)
+workflow.add_node("update_artist", update_artist_node)
+workflow.add_node("update_found_music", update_found_music_node)
 workflow.add_node("summarize_conversation", summarize_conversation_node)
 
 workflow.add_edge(START, "agent")
 workflow.add_conditional_edges("agent", should_continue)
 
-# Tools return straight to the agent: they answer questions, they do not change what the
-# customer has chosen. The weight review sits after the two nodes that can put the pack
-# over its limit — deciding a product, or lowering the limit itself.
+# Tools return straight to the agent: they answer questions, they do not change who the
+# user is. The publish gate sits after the one node that can complete an artist profile,
+# and is the only path to a write on the label's own backend.
 workflow.add_edge("tools", "agent")
 workflow.add_edge("update_profile", "agent")
-workflow.add_edge("update_trip", "weight_review")
-workflow.add_edge("update_gear_needs", "weight_review")
-workflow.add_edge("weight_review", "agent")
+workflow.add_edge("update_found_music", "agent")
+workflow.add_edge("update_artist", "publish_review")
+workflow.add_edge("publish_review", "agent")
 # Compaction is the last thing that happens in a turn, so it ends the run rather than
 # looping back — going back to the agent would produce a second reply to the same message.
 workflow.add_edge("summarize_conversation", END)
@@ -431,7 +425,7 @@ workflow.add_edge("summarize_conversation", END)
 # brings its own (GraphLoadError).
 #
 # `api_graph` is what the FastAPI app runs, and it does need them — nothing else would keep
-# threads or customer memory alive between requests.
+# threads or user memory alive between requests.
 graph = workflow.compile()
 api_graph = workflow.compile(checkpointer=checkpointer, store=store)
 

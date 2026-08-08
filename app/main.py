@@ -1,8 +1,8 @@
-"""FastAPI surface for the camping-store shopping assistant.
+"""FastAPI surface for the It's The Label assistant.
 
 Resource-shaped, following LangGraph Platform: create a thread, then post runs to it.
 Threads belong to a user, and memory is keyed by that user rather than the thread, so a
-returning customer keeps their profile, trip and shortlists.
+returning user keeps their profile, their artist identity and the music found for them.
 """
 
 from app.env import load_env_file
@@ -24,12 +24,16 @@ from pydantic import BaseModel  # noqa: E402
 from app import memory  # noqa: E402
 from app.formatting import build_react_output, normalize_content  # noqa: E402
 from app.graph import api_graph, build_initial_state, store  # noqa: E402
+from app.identity import ID_TOKEN_KEY  # noqa: E402
 
 app = FastAPI(title="Camping Store Shopping Assistant", version="2.0.0")
 
 
 class ThreadPayload(BaseModel):
     user_id: str
+    # The signed-in user's Cognito ID token, if they have one. Optional because browsing the
+    # label as a fan needs no account; only the artist tools do.
+    id_token: str | None = None
 
 
 class RunCommand(BaseModel):
@@ -43,12 +47,23 @@ class RunPayload(BaseModel):
     # `command` resumes a thread paused at an interrupt.
     input: str | None = None
     command: RunCommand | None = None
+    # A fresh token for this run. These expire in about an hour, so a conversation that
+    # outlives one would start failing its backend calls with a token pinned at thread
+    # creation; sending the current one each run lets the UI refresh underneath.
+    id_token: str | None = None
+
+
+class Thread(BaseModel):
+    """What the API layer knows about a conversation: whose it is, and how to sign for them."""
+
+    user_id: str
+    id_token: str | None = None
 
 
 # Threads live only as long as the process, same as the InMemorySaver backing them.
 # Tracking them explicitly is what lets an unknown thread 404 instead of silently
 # behaving like a brand-new one, and is where a thread's owner is recorded.
-_threads: dict[str, str] = {}
+_threads: dict[str, Thread] = {}
 
 
 def _pending_interrupts(snapshot: Any) -> list[Any]:
@@ -61,12 +76,17 @@ def _pending_interrupts(snapshot: Any) -> list[Any]:
 
 
 def _thread_config(thread_id: str) -> RunnableConfig:
-    return {
-        "configurable": {"thread_id": thread_id, "user_id": _threads[thread_id]},
-    }
+    thread = _threads[thread_id]
+    configurable: dict[str, Any] = {"thread_id": thread_id, "user_id": thread.user_id}
+    # Under ID_TOKEN_KEY rather than a plain name so the token stays out of LangSmith traces
+    # and checkpoint metadata — see app/identity.py. Omitted entirely when absent, so a run
+    # without one is indistinguishable from a fan browsing anonymously.
+    if thread.id_token:
+        configurable[ID_TOKEN_KEY] = thread.id_token
+    return {"configurable": configurable}
 
 
-def _require_thread(thread_id: str) -> str:
+def _require_thread(thread_id: str) -> Thread:
     if thread_id not in _threads:
         raise HTTPException(status_code=404, detail=f"Unknown thread: {thread_id}")
     return _threads[thread_id]
@@ -146,10 +166,16 @@ def read_root():
 
 @app.post("/threads", status_code=201)
 def create_thread(payload: ThreadPayload):
-    """Create a conversation thread for a customer. Runs are posted against its id."""
+    """Create a conversation thread for a user. Runs are posted against its id."""
     thread_id = str(uuid.uuid4())
-    _threads[thread_id] = payload.user_id
-    return {"thread_id": thread_id, "user_id": payload.user_id}
+    _threads[thread_id] = Thread(user_id=payload.user_id, id_token=payload.id_token)
+    # The token is deliberately not echoed back: the caller already has it, and a response
+    # body is the easiest place for one to end up in a log.
+    return {
+        "thread_id": thread_id,
+        "user_id": payload.user_id,
+        "signed_in": payload.id_token is not None,
+    }
 
 
 @app.post("/threads/{thread_id}/runs")
@@ -162,8 +188,14 @@ def create_run(thread_id: str, payload: RunPayload):
 
     Which one is required depends on whether the thread is currently paused, so the client
     never has to guess — a mismatch comes back as 409 with the reason.
+
+    Either form may carry `id_token` to hand the run a freshly-minted Cognito ID token; it
+    replaces whatever the thread was holding. Leaving it out keeps the previous one rather
+    than signing the user out mid-conversation.
     """
-    _require_thread(thread_id)
+    thread = _require_thread(thread_id)
+    if payload.id_token:
+        thread.id_token = payload.id_token
 
     config = _thread_config(thread_id)
     snapshot = api_graph.get_state(config)
@@ -201,7 +233,7 @@ def create_run(thread_id: str, payload: RunPayload):
 @app.get("/threads/{thread_id}/state")
 def get_thread_state(thread_id: str):
     """Non-streaming snapshot of a thread — useful after a run, or from the browser."""
-    user_id = _require_thread(thread_id)
+    thread = _require_thread(thread_id)
 
     snapshot = api_graph.get_state(_thread_config(thread_id))
     values = dict(snapshot.values)
@@ -209,7 +241,8 @@ def get_thread_state(thread_id: str):
 
     return {
         "thread_id": thread_id,
-        "user_id": user_id,
+        "user_id": thread.user_id,
+        "signed_in": thread.id_token is not None,
         "status": "interrupted" if interrupts else "idle",
         "interrupts": interrupts,
         "summary": values.get("summary", ""),
@@ -220,11 +253,11 @@ def get_thread_state(thread_id: str):
 
 @app.get("/users/{user_id}/memory")
 def get_user_memory(user_id: str):
-    """Everything remembered about a customer: profile, trip, and gear needs."""
+    """Everything remembered about a user: profile, artist identity, and music found."""
     return memory.read_all(store, user_id)
 
 
 @app.delete("/users/{user_id}/memory", status_code=204)
 def delete_user_memory(user_id: str) -> None:
-    """Forget a customer entirely. Threads keep their transcripts."""
+    """Forget a user entirely. Threads keep their transcripts."""
     memory.clear_all(store, user_id)

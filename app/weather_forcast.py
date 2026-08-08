@@ -1,4 +1,7 @@
-"""Trip weather, from Open-Meteo.
+"""Weather for a place and date range, from Open-Meteo.
+
+Used to pick music against the conditions someone is actually listening in — a wet grey
+week and a bright one call for different records.
 
 The forecast is written straight to the store by the tool itself rather than being handed
 to an extractor to transcribe. It arrives structured from the API, so putting a model in
@@ -7,7 +10,7 @@ the model choosing to call MemoryRouter that turn.
 
 Open-Meteo needs no API key. Its daily forecast reaches roughly two weeks ahead. Past that
 the tool falls back to the historical archive for the same calendar month a year earlier and
-records it as *typical conditions* — never as a forecast, which `TripForecast.basis` marks
+records it as *typical conditions* — never as a forecast, which `SongForecast.basis` marks
 on the record itself.
 """
 
@@ -24,13 +27,13 @@ from langgraph.store.base import BaseStore
 
 from app import memory
 from app.identity import user_id_from_config
-from app.schemas import ForecastDay, MonthAverage, TripForecast
+from app.schemas import ForecastDay, MonthAverage, SongForecast
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 _TIMEOUT = 10
-_MAX_NIGHTS = 14
+_MAX_DAYS = 14
 # The archive lags real time by a few days, so a month that has only just ended may be
 # incomplete. Stepping back a month costs nothing and avoids a half-empty average.
 _ARCHIVE_LAG_DAYS = 10
@@ -52,9 +55,9 @@ def _parse_start(start_date: str) -> datetime.date | dict[str, Any]:
 
 
 def fetch_forecast(
-    location: str, start_date: str, nights: int = 1, place: dict[str, Any] | None = None
-) -> TripForecast | dict[str, Any]:
-    """Call Open-Meteo. Returns a TripForecast, or a dict with an `error` explaining why not.
+    location: str, start_date: str, days_out: int = 1, place: dict[str, Any] | None = None
+) -> SongForecast | dict[str, Any]:
+    """Call Open-Meteo. Returns a SongForecast, or a dict with an `error` explaining why not.
 
     Split out from the tool so the network half can be exercised without a graph or a store.
     `place` may be supplied by a caller that has already geocoded, to save a round trip.
@@ -63,7 +66,7 @@ def fetch_forecast(
     if isinstance(start, dict):
         return start
 
-    end = start + datetime.timedelta(days=max(0, min(nights, _MAX_NIGHTS)))
+    end = start + datetime.timedelta(days=max(0, min(days_out, _MAX_DAYS)))
 
     try:
         place = place or _geocode(location)
@@ -131,7 +134,7 @@ def fetch_forecast(
         )
     ]
 
-    return TripForecast(
+    return SongForecast(
         location=place["name"],
         latitude=place["latitude"],
         longitude=place["longitude"],
@@ -190,7 +193,7 @@ def _numbers(values: Any) -> list[float]:
 
 
 def fetch_month_average(
-    place: dict[str, Any], trip_start: datetime.date, today: datetime.date | None = None
+    place: dict[str, Any], window_start: datetime.date, today: datetime.date | None = None
 ) -> MonthAverage | dict[str, Any]:
     """What the trip's calendar month was like a year ago, averaged.
 
@@ -198,10 +201,10 @@ def fetch_month_average(
     the caller must mark it as such on the record.
     """
     today = today or datetime.date.today()
-    year = _last_finished_occurrence(trip_start.month, trip_start.year - 1, today)
+    year = _last_finished_occurrence(window_start.month, window_start.year - 1, today)
 
     try:
-        payload = _archive_month(place, year, trip_start.month)
+        payload = _archive_month(place, year, window_start.month)
         daily = payload.get("daily") or {}
         lows = _numbers(daily.get("temperature_2m_min"))
         highs = _numbers(daily.get("temperature_2m_max"))
@@ -209,7 +212,7 @@ def fetch_month_average(
         # Fallback within the fallback: if the whole month came back empty, sample a single
         # day from it rather than giving up entirely.
         if not lows and not highs:
-            mid = f"{year:04d}-{trip_start.month:02d}-15"
+            mid = f"{year:04d}-{window_start.month:02d}-15"
             response = requests.get(
                 ARCHIVE_URL,
                 params={
@@ -234,7 +237,7 @@ def fetch_month_average(
     if not lows and not highs:
         return {
             "error": f"No historical weather on file for {place['name']} in "
-            f"{year:04d}-{trip_start.month:02d}."
+            f"{year:04d}-{window_start.month:02d}."
         }
 
     rain = _numbers(daily.get("precipitation_sum"))
@@ -244,7 +247,7 @@ def fetch_month_average(
         return round(sum(values) / len(values), 1) if values else None
 
     return MonthAverage(
-        month=f"{year:04d}-{trip_start.month:02d}",
+        month=f"{year:04d}-{window_start.month:02d}",
         days_sampled=max(len(lows), len(highs)),
         avg_low_f=mean(lows),
         avg_high_f=mean(highs),
@@ -255,9 +258,9 @@ def fetch_month_average(
     )
 
 
-def fetch_trip_weather(
-    location: str, start_date: str, nights: int = 1
-) -> TripForecast | dict[str, Any]:
+def fetch_weather_window(
+    location: str, start_date: str, days_out: int = 1
+) -> SongForecast | dict[str, Any]:
     """A real forecast if the trip is close enough, otherwise typical past conditions.
 
     Which one you get is decided by Open-Meteo rejecting the range, not by a hardcoded
@@ -274,8 +277,8 @@ def fetch_trip_weather(
     if place is None:
         return {"error": f"Could not find a location matching '{location}'."}
 
-    forecast = fetch_forecast(location, start_date, nights, place=place)
-    if isinstance(forecast, TripForecast):
+    forecast = fetch_forecast(location, start_date, days_out, place=place)
+    if isinstance(forecast, SongForecast):
         return forecast
 
     average = fetch_month_average(place, start)
@@ -288,8 +291,8 @@ def fetch_trip_weather(
             f"Historical fallback also failed: {average.get('error', 'unknown reason')}"
         }
 
-    end = start + datetime.timedelta(days=max(0, min(nights, _MAX_NIGHTS)))
-    return TripForecast(
+    end = start + datetime.timedelta(days=max(0, min(days_out, _MAX_DAYS)))
+    return SongForecast(
         location=place["name"],
         latitude=place["latitude"],
         longitude=place["longitude"],
@@ -307,28 +310,28 @@ def weather_forcast_tool(
     start_date: str,
     config: RunnableConfig,
     store: Annotated[BaseStore, InjectedStore()],
-    nights: int = 1,
+    days_out: int = 1,
 ) -> dict[str, Any]:
-    """Fetches the weather for a trip and saves it to the trip record.
+    """Fetches the weather for a place and date range, and saves it to the user's record.
 
-    Call this once you know where and when the customer is going. The result is saved
-    automatically, so later turns can read it from the trip context rather than calling
-    this again.
+    Call this when the user mentions where they are, or where they will be, and you want to
+    pick music against the conditions. The result is saved automatically, so later turns can
+    read it from the context below rather than calling this again.
 
     Within about two weeks it returns a real day-by-day forecast (`basis: "forecast"`).
     Further out no forecast exists, so it returns what that month was actually like a year
-    ago (`basis: "historical"`, with `month_average`). Treat that as typical conditions to
-    plan against, never as a prediction, and tell the customer which one they are getting.
+    ago (`basis: "historical"`, with `month_average`). Treat that as typical conditions,
+    never as a prediction, and tell the user which one they are getting.
 
     Args:
-        location: Place name, e.g. "Big Bear" or "Cairngorms".
-        start_date: First day of the trip as an ISO date, YYYY-MM-DD.
-        nights: How many nights they are out, so the whole trip window is covered.
+        location: Place name, e.g. "Glasgow" or "Lagos".
+        start_date: First day of the window as an ISO date, YYYY-MM-DD.
+        days_out: How many days the window covers, so a whole week can be fetched at once.
 
     Returns:
         The weather record, or an `error` explaining why none is available.
     """
-    result = fetch_trip_weather(location, start_date, nights)
+    result = fetch_weather_window(location, start_date, days_out)
     if isinstance(result, dict):
         return result
 

@@ -1,15 +1,18 @@
-## Agentic Ecommerce LangGraph
+## Song Artist Promotion App
 
-A shopping assistant for an online camping store. It asks about the trip, searches the
-store catalog, and narrows the options down with the customer — remembering who they are
-and what they have ruled out, across conversations.
+An assistant for It's The Label, an independent record label. It serves two kinds of
+visitor: **fans**, whose taste it draws out before searching the song catalog and narrowing
+the options down with them, and **artists**, whose profile it builds up in conversation and
+then publishes to the label's backend once they confirm. It remembers who someone is and
+what they have ruled out, across conversations.
 
 | Module | Role |
 | --- | --- |
 | [app/schemas.py](app/schemas.py) | The router struct and the memory records |
-| [app/catalog.py](app/catalog.py) | Catalog + the `search_products` / `get_product` tools |
+| [app/catalog.py](app/catalog.py) | Song catalog + the `search_songs` / `get_song` tools |
 | [app/memory.py](app/memory.py) | trustcall extractors, change reporting, prompt rendering |
-| [app/graph.py](app/graph.py) | The graph: agent, tools, memory nodes, weight review |
+| [app/graph.py](app/graph.py) | The graph: agent, tools, memory nodes, publish gate |
+| [app/graphql_backend_client.py](app/graphql_backend_client.py) | CRUD tools against the label's GraphQL backend |
 | [app/main.py](app/main.py) | FastAPI routes |
 
 ### Setup
@@ -29,8 +32,33 @@ cp .env.example .env
 | `LANGSMITH_API_KEY` | for tracing / Studio | From https://smith.langchain.com → Settings → API Keys. |
 | `LANGSMITH_PROJECT` | no | Project the traces land in, defaults to `default`. |
 | `LANGSMITH_ENDPOINT` | no | LangSmith API host. |
+| `ITL_GRAPHQL_URL` | no | The label's GraphQL backend, defaults to `https://itsthelabel.com/graphql`. |
+| `ITL_ID_TOKEN` | no | Fallback Cognito **ID** token for scripts and Studio. The UI's per-run token wins over it — see below. |
+| `ITL_AUTH_TYPE` | no | Value for the backend's mandatory `?type=` parameter when signed in, defaults to `artist`. |
 
 `.env` is gitignored. Real environment variables take precedence over it.
+
+### Signing backend calls
+
+The label's backend gates publishing a song behind a signed-in artist, so the run has to
+carry that user's Cognito **ID** token (`token_use: "id"` — not the access token). The UI
+holds it and posts it with each run:
+
+```bash
+curl -X POST localhost:8000/threads -d '{"user_id": "dean", "id_token": "<id-token>"}'
+curl -X POST localhost:8000/threads/$THREAD/runs -d '{"input": "publish my new single", "id_token": "<fresh-id-token>"}'
+```
+
+`id_token` is optional in both places — browsing the label as a fan needs no account. On a
+run it replaces whatever the thread was holding, which is how a conversation outlives the
+token's roughly one-hour life; omitting it keeps the previous one rather than signing the
+user out mid-chat.
+
+Resolution order is per-run token → Studio's `id_token` context field → `ITL_ID_TOKEN`. The
+token is never a tool argument the model can see or invent: it travels on the run config, and
+tools read it via `id_token_from_config` the same way they read `user_id`. It rides under a
+key prefixed `__`, which is what keeps it out of LangSmith traces and checkpoint metadata —
+see the comment in `app/identity.py` before renaming it.
 
 ### Local Development
 Run the FastAPI app locally:
@@ -45,16 +73,16 @@ The API follows the LangGraph Platform resource shape: create a thread, then pos
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/threads` | Create a thread for a customer, returns `{"thread_id", "user_id"}` |
+| `POST` | `/threads` | Create a thread for a user, returns `{"thread_id", "user_id"}` |
 | `POST` | `/threads/{thread_id}/runs` | Run the graph on that thread, streams SSE |
 | `GET` | `/threads/{thread_id}/state` | Non-streaming snapshot of the thread |
-| `GET` | `/users/{user_id}/memory` | Everything remembered about a customer |
-| `DELETE` | `/users/{user_id}/memory` | Forget a customer |
+| `GET` | `/users/{user_id}/memory` | Everything remembered about a user |
+| `DELETE` | `/users/{user_id}/memory` | Forget a user |
 
 **1. Create a thread**
 
-Threads belong to a customer. Memory is keyed by `user_id`, not by thread, so the same
-customer picks up where they left off in a new conversation.
+Threads belong to a user. Memory is keyed by `user_id`, not by thread, so the same
+user picks up where they left off in a new conversation.
 
 ```bash
 THREAD_ID=$(curl -sX POST http://127.0.0.1:8000/threads \
@@ -67,7 +95,7 @@ THREAD_ID=$(curl -sX POST http://127.0.0.1:8000/threads \
 ```bash
 curl -N -X POST "http://127.0.0.1:8000/threads/$THREAD_ID/runs" \
   -H "Content-Type: application/json" \
-  -d '{"input": "I am off to Big Bear, California for 3 nights in October, two of us, backpacking."}'
+  -d '{"input": "I want something quiet I can work to. I like shoegaze, nothing with shouty vocals."}'
 ```
 
 The response is a Server-Sent Events stream of five event types:
@@ -82,49 +110,40 @@ The response is a Server-Sent Events stream of five event types:
 - `done` — carries the full `react` trace: `react.steps` and `react.final_answer`
 
 Posting another `{"input": ...}` to the same thread continues the conversation — the checkpointer
-keeps the message history, so follow-ups like *"the MSR is too pricey, drop it"* work.
+keeps the message history, so follow-ups like *"the Marisol one has vocals, skip it"* work.
 
 **3. Resume a paused run**
 
-The graph pauses when the customer's **chosen** kit goes over the pack-weight limit for the
-trip. That limit is the trip's own `max_carry_weight_lb` and nothing else — there is no house
-default, so a trip where the customer never named a limit is never reviewed. The total is
-summed in code from the catalog, never from the model, so the review triggers on a figure
-that is always right. It is checked after a gear decision or a change to the limit.
-
-The assistant asks for a limit once, while gear is being chosen, if the trip is backpacking
-and none is recorded. It does not ask for car camping.
-
-The `interrupt` payload carries what was chosen, how far over it is, and the lighter
-options already discussed for each need:
+The graph pauses when an artist profile is complete and the label's backend has not seen it
+yet — creating an artist is a public write with no delete, so it never happens on the model's
+say-so. The payload shown is built from the stored record:
 
 ```json
-{ "question": "The chosen kit is 6.44 lb, 1.44 lb over the 5.0 lb limit for this trip. ...",
-  "committed_lb": 6.44, "limit_lb": 5.0, "over_by_lb": 1.44,
-  "items": [{"need_id": "tent", "name": "Vango Nevis 200", "weight_lb": 4.19, "...": "..."}],
-  "lighter_options": {"tent": [{"product_id": "tent-terranova-laser-2", "saves_lb": 0.6}]} }
+{ "question": "Publish 'The Quiet Hours' to the label? This creates a public artist profile, ...",
+  "artist": {"name": "The Quiet Hours", "genre": "shoegaze", "bio": null, "image_url": null},
+  "incomplete": ["bio", "image_url"] }
 ```
 
-Resume with exactly one of four resolutions:
+`incomplete` is advisory — the backend only requires a name — but it is worth a last look
+before something public goes out half-filled. Resume with exactly one of three resolutions:
 
 ```bash
 curl -N -X POST "http://127.0.0.1:8000/threads/$THREAD_ID/runs" \
   -H "Content-Type: application/json" \
-  -d '{"command": {"resume": {"swap": {"need_id": "tent", "product_id": "tent-terranova-laser-2"}}}}'
+  -d '{"command": {"resume": {"amend": {"bio": "Four people and one amp"}}}}'
 ```
 
 | Resume value | Effect |
 | --- | --- |
-| `{"swap": {"need_id": ..., "product_id": ...}}` | Choose a different product for that need |
-| `{"drop": "tent"}` | Un-choose it; the candidate is kept, marked eliminated with the reason |
-| `{"max_carry_weight_lb": 7}` | Raise (or lower) the trip's limit |
-| `{"warning_overridden": true}` | Carry on over the limit anyway |
+| `{"confirm": true}` | Send it. The returned id and slug are written to the record in code |
+| `{"amend": {"genre": ..., "bio": ...}}` | Edit the profile and show it again; only backend-writable fields are accepted |
+| `{"cancel": true}` | Leave it as a draft |
 
-After a swap, drop, or limit change the total is **re-checked**: if the pack is still over,
-you get another `interrupt` rather than a silent pass. Anything else re-prompts with an
-`error` field, and the thread stays paused until it gets a usable answer.
+After an amend the profile is **re-shown** rather than silently sent. Anything else re-prompts
+with an `error` field, and the thread stays paused until it gets a usable answer. If the
+backend rejects the write, the ids stay unset and the gate offers again next turn.
 
-**4. Inspect a thread, or a customer**
+**4. Inspect a thread, or a user**
 
 ```bash
 curl "http://127.0.0.1:8000/threads/$THREAD_ID/state"   # this conversation
@@ -145,47 +164,68 @@ interactive documentation at `http://127.0.0.1:8000/docs`.
 
 ## Memory
 
-Two things persist per customer, keyed by `user_id` and living beyond any single thread:
+Four records persist per user, keyed by `user_id` and living beyond any single thread:
 
 | Record | Store namespace | Holds |
 | --- | --- | --- |
-| `UserProfile` | `("profile", user_id)` | Activities they do, experience, gear owned, budget, brands, constraints like *sleeps cold* |
-| `TripPlan` | `("trip", user_id)` | Destination, dates, nights, party size, season, conditions |
-| `GearNeed` | `("gear_needs", user_id)` | **One document per thing they are shopping for**, each owning its candidate products |
-| `TripForecast` | `("forecast", user_id)` | Day-by-day Open-Meteo forecast for the trip window. Written by the weather tool in code, never by an extractor |
+| `UserProfile` | `("profile", user_id)` | Who they are as a listener: genres, artists they follow, what they have ruled out, how they listen |
+| `ArtistProfile` | `("artist", user_id)` | Their own artist identity if they have one: name, genre, bio, image, influences, albums, songs, tour dates |
+| `SongCollection` | `("found_music", user_id)` | Every song put in front of them, each with why it was offered and what became of it |
+| `SongForecast` | `("forecast", user_id)` | Open-Meteo weather for where they are listening. Written by the weather tool in code, never by an extractor |
 
-`GearNeed` is the collection that gets narrowed. Each candidate carries a `status`
-(`candidate` / `shortlisted` / `eliminated`), a `fit_reason`, and — once ruled out — an
-`eliminated_reason`. Eliminated candidates are never deleted: why an option was rejected is
-the useful part of the record, and stops the assistant re-suggesting it.
+`SongCollection` is the collection that gets narrowed. Each song carries a `status`
+(`suggested` / `liked` / `dismissed`), a `why_found`, and — once ruled out — a
+`dismissed_reason`. Dismissed songs are never deleted: why something was rejected is the
+useful part of the record, and stops the assistant offering it again.
+
+`ArtistProfile` does double duty. Its first four fields are exactly the backend's
+`CreateArtistInput`, so publishing is a projection (`to_create_input()`) rather than a
+translation, and the fields below them are colour the label's API has no column for. Its last
+two — `backend_artist_id` and `artist_slug` — are the only fields written in code after the
+backend accepts the profile, and `update_artist` carries them over from the stored record
+rather than trusting the extractor's output. The instruction tells the model not to invent
+them, but an id is the one field where a hallucination gets acted on as real.
+
+### Schemas per CRUD operation
+
+The backend's write operations each have their own payload schema in
+[app/schemas.py](app/schemas.py), kept separate from the memory records so that what we
+*remember* about an artist and what we are *entitled to send* are never the same object:
+
+| Schema | Backend operation |
+| --- | --- |
+| `CreateArtistInput` | `artists.createArtist` |
+| `UploadSongInput` | `songs.getUploadUrl` |
+| `CreateSongInput` | `songs.createSong` |
+
+There is deliberately no password field anywhere. Records here are filled by an extraction
+model reading the transcript and are served verbatim by `GET /users/{id}/memory`, so a
+password field would be a standing instruction to copy a secret into a readable store.
 
 ### Two ways a record gets written
 
-**Conversational facts are extracted.** What the customer says has to be interpreted, so the
+**Conversational facts are extracted.** What the user says has to be interpreted, so the
 agent asks for a write and a model does the interpreting — the router path below.
 
-**Data from a tool is written in code.** `TripForecast` arrives already structured from
+**Data from a tool is written in code.** `SongForecast` arrives already structured from
 Open-Meteo, so [weather_forcast_tool](app/weather_forcast.py) writes it to the store itself
 via `InjectedStore` and returns it for the agent to talk about. No router call, no extractor,
-no extra model turn — the write cannot be skipped or garbled.
+no extra model turn — the write cannot be skipped or garbled. The same rule covers the
+backend ids on `ArtistProfile`, which the publish gate writes after `createArtist` returns.
 
 That is also why the forecast is its own record under `("forecast", user_id)` rather than a
-field on `TripPlan`. The trip extractor is handed the whole `TripPlan` as `existing` on every
-trip update, so a field living there would be fair game to rewrite or drop on an unrelated
-turn. Two writers on one field will eventually disagree, and the model writes last.
-
-The customer's own expectations stay in `TripPlan.expected_conditions` (extracted — genuinely
-conversational). When the two disagree, that is useful signal rather than a conflict:
-*"you said mild, the forecast has lows near freezing."*
+field on another record. An extractor is handed the whole document as `existing` on every
+update, so a field living there would be fair game to rewrite or drop on an unrelated turn.
+Two writers on one field will eventually disagree, and the model writes last.
 
 **Past the forecast horizon it falls back to history.** Open-Meteo needs no API key and its
 forecast reaches about two weeks. Further out — which is exactly when someone is buying a
-sleeping bag — the tool pulls the *same calendar month a year earlier* from the historical
+record — the tool pulls the *same calendar month a year earlier* from the historical
 archive and stores its monthly average as typical conditions:
 
 ```
 TYPICAL CONDITIONS FOR THE TRIP (PAST WEATHER, NOT A FORECAST):
-- NOT A FORECAST. No forecast reaches 2026-12-01, so this is what Big Bear was
+- NOT A FORECAST. No forecast reaches 2026-12-01, so this is what Glasgow was
   actually like in December 2025 (31 days on record).
 - Typical night 39.1F, typical day 53.7F
 - Coldest night that month 23.5F, warmest day 65.3F — size warmth against the cold end
@@ -209,26 +249,49 @@ executed as one — a conditional edge reads `update_type` off the call and send
 the matching node:
 
 ```
-                ┌ MemoryRouter(profile)    → update_profile    ─┐
-                ├ MemoryRouter(trip)       → update_trip       ─┤
-START → agent ──┼ MemoryRouter(gear_needs) → update_gear_needs ─┼→ agent
-                ├ catalog / cargo tool → tools → weight_review ─┘
-                └ no tool call ────────────────────────────────→ END
+                ┌ MemoryRouter(profile)     → update_profile     ────────┐
+                ├ MemoryRouter(artist)      → update_artist → publish    ┤
+START → agent ──┼ MemoryRouter(found_music) → update_found_music ────────┼→ agent
+                ├ catalog / weather / backend tool → tools ──────────────┘
+                └ no tool call ────────────────────────────────────────→ END
 ```
 
 Each update node hands the conversation to a [trustcall](https://github.com/hinthornw/trustcall)
 extractor. trustcall asks the model for a **JSON patch** against the existing record and
 validates it against the schema, rather than asking it to re-emit the whole document. That
-distinction is the point: when a customer says *"the MSR is too pricey, drop it"*, only that
-one candidate changes —
+distinction is the point: when a user says *"the Marisol one has vocals, I can't work to
+words"*, only that one song changes —
 
 ```
-replace /candidates/3/status = eliminated
-add     /candidates/3/eliminated_reason = The MSR is too pricey for me
+replace /songs/1/status = dismissed
+add     /songs/1/dismissed_reason = The Marisol one has vocals, I can't work to words
 ```
 
-— while the other three candidates keep their `fit_reason` text verbatim. Asking a model to
-reproduce a large nested document is where detail quietly goes missing.
+— while the other songs keep their `why_found` text verbatim. Asking a model to reproduce a
+large nested document is where detail quietly goes missing.
+
+### The publish gate
+
+`update_artist` is the one memory node that does not return straight to the agent. It routes
+through `publish_review`, which interrupts before anything reaches the label's backend:
+
+```
+POST /threads/{id}/runs  {"command": {"resume": {"confirm": true}}}
+                         {"command": {"resume": {"amend": {"bio": "Four people, one amp"}}}}
+                         {"command": {"resume": {"cancel": true}}}
+```
+
+Creating an artist is a public write the backend offers no way to undo, so it never happens
+on the model's say-so — `create_artist` is deliberately **not** in `backend_tools`, which is
+what stops the agent routing around the gate. The payload shown to the user is built from the
+stored record, not from anything the model composed that turn. An `amend` edits the record and
+re-prompts; anything unrecognised re-prompts with an `error`, so the thread stays paused until
+it gets a usable answer.
+
+Resuming replays the node from the top, so only reads and idempotent amendments sit above the
+`interrupt()` — the write itself is below the loop and runs once. If it fails, the backend ids
+stay unset and the gate offers again next turn rather than leaving the user believing they are
+on the roster.
 
 ### Knowing what changed
 
@@ -238,9 +301,9 @@ walks the run tree afterwards and recovers them, including trustcall's `planned_
 model's own sentence describing what it meant to change.
 
 Those lines go two places: into the `ToolMessage` the agent sees, so its reply can tell the
-customer specifically what was recorded, and into the `memory` SSE event for the UI. If the
+user specifically what was recorded, and into the `memory` SSE event for the UI. If the
 spy comes back empty, a plain before/after diff of the stored record is used instead, so the
-customer is never told "updated" with no detail.
+user is never told "updated" with no detail.
 
 Setting `MemoryRouter` aside, nothing is extracted on turns where the agent does not ask for
 it, so an ordinary chat turn costs no extra model call.
@@ -266,7 +329,7 @@ AI reply, never between a tool request and its result — either half surviving 
 invalid. If that leaves nothing to drop, the node returns without calling the model at all,
 rather than paying for a summary that removes zero messages.
 
-Long-term memory is unaffected: profile, trip and gear needs live in the store, not the
+Long-term memory is unaffected: profile, artist and found music live in the store, not the
 transcript, so compaction never loses what was chosen or ruled out.
 
 ## Using LangSmith
@@ -329,9 +392,9 @@ span per step:
 - `agent` → the `ChatXAI` call, with the full message list sent to Grok — including the
   rendered memory prompt — the raw reply, latency and token usage. Requested `tool_calls`
   appear here, whether for a catalog tool or the `MemoryRouter`.
-- `tools` → the `search_products` / `get_product` / `calculate_gear_weight` invocation, with
+- `tools` → the `search_songs` / `get_song` / backend tool invocation, with
   the arguments Grok chose and the value returned.
-- `update_profile` / `update_trip` / `update_gear_needs` → the trustcall extractor. Expand it
+- `update_profile` / `update_artist` / `update_found_music` → the trustcall extractor. Expand it
   to see the `PatchDoc` call: the `planned_edits` sentence and the individual JSON patches.
   This is the trace to open when a record ends up wrong.
 - `agent` again → the follow-up call where Grok turns the result into a reply.
@@ -381,7 +444,7 @@ other `AgentState` fields (`current_topic`, `summary`, `original_query`, `input`
 input is a single human message:
 
 ```text
-I'm off to Big Bear for 3 nights in October, two of us, backpacking.
+I want something quiet I can work to. I like shoegaze.
 ```
 
 From there you can watch the graph light up node by node, click any node to inspect the state
@@ -397,12 +460,12 @@ requests. Same `workflow`, same nodes, two runtimes that persist differently.
 
 Consequences worth knowing: Studio threads and FastAPI threads are separate, so a thread id
 from one path means nothing to the other — and so are their stores, which is why deleting a
-customer through the API does not clear what Studio remembers.
+user through the API does not clear what Studio remembers.
 
 ### Starting from a clean slate
 
-A new thread is **not** a fresh customer. Threads hold the transcript; profile, trip and gear
-needs are keyed by `user_id` in the store and outlive any thread by design. Switch customer,
+A new thread is **not** a fresh user. Threads hold the transcript; profile, artist and found
+needs are keyed by `user_id` in the store and outlive any thread by design. Switch user,
 and everything is new:
 
 | | |

@@ -1,7 +1,9 @@
-"""Store catalog and the tools the agent uses to shop it.
+"""The label's song catalog and the tools the agent uses to search it.
 
-The catalog is seed data in app/data/products.json. `search_products` is the seam a real
-inventory backend would slot into — the agent only ever sees the tool signature.
+The catalog is seed data in app/data/songs.json. `search_songs` is the seam the label's
+own backend slots into — the agent only ever sees the tool signature. It is kept local and
+offline on purpose: discovery has to work when the backend does not, and the backend tools
+in app/graphql_backend_client.py cover the live roster separately.
 """
 
 import json
@@ -10,119 +12,110 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from app.schemas import Product
+from app.schemas import Song
 
-_CATALOG_PATH = Path(__file__).resolve().parent / "data" / "products.json"
+_CATALOG_PATH = Path(__file__).resolve().parent / "data" / "songs.json"
 
-CATALOG: list[Product] = [
-    Product.model_validate(row) for row in json.loads(_CATALOG_PATH.read_text())
+CATALOG: list[Song] = [
+    Song.model_validate(row) for row in json.loads(_CATALOG_PATH.read_text())
 ]
-_BY_ID: dict[str, Product] = {product.product_id: product for product in CATALOG}
-CATEGORIES: list[str] = sorted({product.category for product in CATALOG})
+_BY_ID: dict[str, Song] = {song.song_id: song for song in CATALOG}
+GENRES: list[str] = sorted({song.genre for song in CATALOG})
+MOODS: list[str] = sorted({song.mood for song in CATALOG if song.mood})
 
 # Results per search. Small on purpose: the whole list would crowd out the conversation,
-# and a shortlist the customer can actually hold in their head is the point.
+# and a shortlist the user can actually hold in their head is the point.
 _MAX_RESULTS = 5
 
 
-def product_by_id(product_id: str) -> Product | None:
-    """Plain lookup, for code that needs a product without going through the tool."""
-    return _BY_ID.get(product_id)
+def song_by_id(song_id: str) -> Song | None:
+    """Plain lookup, for code that needs a song without going through the tool."""
+    return _BY_ID.get(song_id)
 
 
-def _summarize(product: Product) -> dict[str, Any]:
-    """The view the model sees — full specs come from get_product."""
+def _summarize(song: Song) -> dict[str, Any]:
+    """The view the model sees — the full record comes from get_song."""
     summary: dict[str, Any] = {
-        "product_id": product.product_id,
-        "name": product.name,
-        "brand": product.brand,
-        "category": product.category,
-        "price_usd": product.price_usd,
-        "in_stock": product.in_stock,
-        "description": product.description,
+        "song_id": song.song_id,
+        "name": song.name,
+        "artist": song.artist,
+        "genre": song.genre,
+        "description": song.description,
     }
-    for field in ("weight_lb", "season", "capacity", "temp_rating_c"):
-        value = getattr(product, field)
+    for field in ("mood", "year", "duration_sec"):
+        value = getattr(song, field)
         if value is not None:
             summary[field] = value
     return summary
 
 
 @tool
-def search_products(
-    category: str,
-    max_price_usd: float | None = None,
-    max_weight_lb: float | None = None,
-    season: str | None = None,
-    min_capacity: int | None = None,
-    activity: str | None = None,
+def search_songs(
+    genre: str | None = None,
+    artist: str | None = None,
+    mood: str | None = None,
+    tag: str | None = None,
+    max_duration_sec: int | None = None,
+    released_since: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Search the camping store catalog for products matching a customer's requirements.
+    """Search the label's song catalog for music matching what a listener has asked for.
 
-    Use this before recommending anything, so recommendations only ever cite real stock.
+    Use this before recommending anything, so recommendations only ever cite real songs on
+    the label. Every filter is optional — calling it with none returns a cross-section of
+    the catalog, which is a reasonable way to start with someone who has not said much yet.
 
     Args:
-        category: One of tent, sleeping_bag, sleeping_pad, stove, backpack, headlamp,
-            water_filter, insulation.
-        max_price_usd: Upper price limit in USD.
-        max_weight_lb: Upper weight limit in lb. Matters for backpacking, not car camping.
-        season: summer, 3-season or winter. Products rated for harsher conditions than
-            asked for are included; lighter-rated ones are not.
-        min_capacity: Minimum people (tents) or litres (backpacks).
-        activity: Filter to products suited to an activity, e.g. backpacking, winter hiking.
+        genre: One of ambient, afrobeat, country, electronic, folk, jazz, post-rock, punk,
+            shoegaze, soul.
+        artist: Restrict to one artist by name.
+        mood: How the song feels, e.g. calm, melancholy, joyful, angry, euphoric.
+        tag: A single descriptor to match, e.g. 'instrumental', 'quiet', 'danceable',
+            'guitar', 'long'.
+        max_duration_sec: Longest acceptable track, in seconds.
+        released_since: Only songs released in this year or later.
 
     Returns:
-        Up to 5 matching products, cheapest first. Empty list if nothing matches — say so
+        Up to 5 matching songs, newest first. Empty list if nothing matches — say so
         rather than inventing an alternative.
     """
-    # Harsher-rated gear also serves a milder trip, so treat season as a floor.
-    season_rank = {"summer": 0, "3-season": 1, "winter": 2}
-    wanted_rank = season_rank.get(season or "", None)
+    matches: list[Song] = []
+    for song in CATALOG:
+        if genre is not None and song.genre.lower() != genre.lower():
+            continue
+        if artist is not None and artist.lower() not in song.artist.lower():
+            continue
+        if mood is not None and (song.mood or "").lower() != mood.lower():
+            continue
+        if tag is not None and tag.lower() not in [t.lower() for t in song.tags]:
+            continue
+        if max_duration_sec is not None and (
+            song.duration_sec is None or song.duration_sec > max_duration_sec
+        ):
+            continue
+        if released_since is not None and (song.year is None or song.year < released_since):
+            continue
+        matches.append(song)
 
-    matches: list[Product] = []
-    for product in CATALOG:
-        if product.category != category or not product.in_stock:
-            continue
-        if max_price_usd is not None and product.price_usd > max_price_usd:
-            continue
-        if max_weight_lb is not None and (
-            product.weight_lb is None or product.weight_lb > max_weight_lb
-        ):
-            continue
-        if wanted_rank is not None and (
-            product.season is None or season_rank[product.season] < wanted_rank
-        ):
-            continue
-        if min_capacity is not None and (
-            product.capacity is None or product.capacity < min_capacity
-        ):
-            continue
-        if activity is not None and activity.lower() not in [
-            a.lower() for a in product.activities
-        ]:
-            continue
-        matches.append(product)
-
-    matches.sort(key=lambda p: p.price_usd)
-    return [_summarize(product) for product in matches[:_MAX_RESULTS]]
+    matches.sort(key=lambda s: s.year or 0, reverse=True)
+    return [_summarize(song) for song in matches[:_MAX_RESULTS]]
 
 
 @tool
-def get_product(product_id: str) -> dict[str, Any]:
-    """Look up the full details of one catalog product by its id.
+def get_song(song_id: str) -> dict[str, Any]:
+    """Look up the full details of one catalog song by its id.
 
-    Use when comparing a shortlist, or when the customer asks about a specific item.
+    Use when comparing a shortlist, or when the user asks about a specific track.
 
     Args:
-        product_id: The catalog id, exactly as returned by search_products.
+        song_id: The catalog id, exactly as returned by search_songs.
 
     Returns:
-        The product's full record, or an error message if the id is not in the catalog.
+        The song's full record, or an error message if the id is not in the catalog.
     """
-    product = _BY_ID.get(product_id)
-    if product is None:
-        return {"error": f"No product with id {product_id!r} in the catalog."}
-    return product.model_dump()
+    song = _BY_ID.get(song_id)
+    if song is None:
+        return {"error": f"No song with id {song_id!r} in the catalog."}
+    return song.model_dump()
 
 
-catalog_tools = [search_products, get_product]
+catalog_tools = [search_songs, get_song]
